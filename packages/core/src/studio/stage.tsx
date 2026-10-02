@@ -1,5 +1,6 @@
 "use client";
 
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { LiveAudio } from "./audio.ts";
 import { noteFromKey, Piano } from "./piano.tsx";
@@ -28,6 +29,17 @@ function notesPayload(held: number[], gate: boolean): number[] | null {
     }
   }
   return notes;
+}
+
+async function bootstrapText(): Promise<string> {
+  if (!isTauri()) {
+    return "";
+  }
+  try {
+    return await invoke<string>("bootstrap_status");
+  } catch {
+    return "";
+  }
 }
 
 async function fetchHealth(): Promise<EngineHealth | null> {
@@ -245,6 +257,17 @@ export function Stage() {
         body = await fetchHealth();
       } catch {
         body = null;
+      }
+      if (!stop && !body) {
+        const text = await bootstrapText();
+        if (!stop && text) {
+          setHealth(null);
+          if (phaseRef.current !== "live" && phaseRef.current !== "loading") {
+            setPhase("offline");
+            setStatus(text);
+          }
+          return;
+        }
       }
       if (!stop) {
         applyHealth(body, phaseRef.current, setHealth, setPhase, setStatus);

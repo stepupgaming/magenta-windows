@@ -28,7 +28,8 @@ From the repo root:
 - `npx --package github:stepupgaming/magenta-windows magenta --help`
 - `bunx --package github:stepupgaming/magenta-windows magenta --help`
 - `bun run dev` opens the desktop window. It calls pnpm. Do not launch it unless the user asked to see the window.
-- `powershell -ExecutionPolicy Bypass -File .\install.ps1` installs `magenta` onto the user PATH. A test install passes `-Prefix` and `-NoPath`.
+- The Windows release file is `Magenta.exe`. Download it from the GitHub release and run it. First launch installs PyTorch and the checkpoint. Do not build an NSIS installer.
+- `powershell -ExecutionPolicy Bypass -File .\install.ps1` installs the `magenta` command onto the user PATH. A test install passes `-Prefix` and `-NoPath`.
 
 `generate` writes one wav and exits. Tell the user the absolute path of that wav. The default relative path is `magenta.wav` in the current directory. Pass an absolute `--out` when you need a stable path.
 

@@ -18,13 +18,11 @@ Do not run `load` or `generate` unless the user asked for audio or a loaded mode
 
 ## Install
 
-Requirements: Windows, an NVIDIA GPU with 16 GB, a driver that can run CUDA 13, Node.js 20+, uv, and git. The desktop window also needs pnpm 10 and Rust.
+Requirements: Windows, an NVIDIA GPU with 16 GB, and a driver that can run CUDA 13.
 
-Global install. This clones the repo under `%LOCALAPPDATA%\magenta-windows\app`, creates the Python environment, fetches weights, and puts `magenta` on the user PATH:
+Download [Magenta.exe](https://github.com/stepupgaming/magenta-windows/releases/latest/download/Magenta.exe) and run it. The first launch installs PyTorch and downloads the checkpoint into your user profile. The window opens while that runs. The header line shows the step. Closing the window stops the setup.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
+A checkout is for development. It needs Node.js 20+, uv, pnpm 10, and Rust.
 
 From a checkout, without changing PATH:
 
@@ -92,7 +90,8 @@ Publish a release by pushing a `v0.0.0` tag, or by running the `Release Windows`
 - `engine/magenta_win/cli.py` is the command line.
 - `engine/server.py` is the CUDA server.
 - `engine/model_code` is the Apache-2.0 PyTorch port of `google/magenta-realtime-2`.
-- `install.ps1` is the Windows global install.
+- `Magenta.exe` on the GitHub release is the app. First launch extracts the engine under `%LOCALAPPDATA%\Magenta\app` when the exe is outside a checkout.
+- `install.ps1` puts the `magenta` command on PATH for a checkout-style install. The release does not use it.
 - `.grok/skills/magenta-windows/SKILL.md` is the agent skill.
 
 ## License

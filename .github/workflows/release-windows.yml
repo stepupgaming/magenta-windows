@@ -8,6 +8,11 @@ on:
         required: true
         type: string
         default: "v0.1.0"
+      pack_weights:
+        description: "Download and upload the checkpoint parts"
+        required: false
+        type: boolean
+        default: true
   push:
     tags:
       - "v*.*.*"
@@ -18,6 +23,7 @@ permissions:
 jobs:
   weights:
     name: Pack weights and publish the Windows release
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.pack_weights }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -50,29 +56,90 @@ jobs:
           else
             TAG="${GITHUB_REF_NAME}"
           fi
-          NOTES=$(cat <<EOF
-          Windows release of Magenta RealTime 2.
+          NOTES=$(cat <<'EOF'
+          Download Magenta.exe and run it.
 
-          The checkpoint is not one file. GitHub limits a release asset to 2 GB, and model.safetensors is about 9 GB. magenta-weights.json lists the parts. install.ps1, npx, and bunx reassemble them into the Hugging Face cache.
+          First launch installs the CUDA engine and downloads the checkpoint. The part files on this release are the weights. There is no separate installer.
 
-          The weight bytes are the public files from magenta-community/magenta-realtime-2 and magenta-torch/magenta-rt-musiccoca-torch. They stay under those model licenses.
-
-          Install on Windows:
-
-          powershell -ExecutionPolicy Bypass -File .\install.ps1
-
-          Or, from a checkout:
-
-          npx --package github:stepupgaming/magenta-windows magenta --help
-          bunx --package github:stepupgaming/magenta-windows magenta --help
-          bun run dev
+          https://github.com/stepupgaming/magenta-windows/releases/latest/download/Magenta.exe
           EOF
           )
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" release-weights/* install.ps1 --clobber
+            gh release upload "$TAG" release-weights/* --clobber
+            gh release edit "$TAG" --notes "$NOTES"
           else
-            gh release create "$TAG" release-weights/* install.ps1 \
+            gh release create "$TAG" release-weights/* \
               --target "${GITHUB_SHA}" \
               --title "$TAG" \
               --notes "$NOTES"
           fi
+
+  app:
+    name: Build Magenta.exe
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./apps/native/src-tauri -> target"
+
+      - name: Build the exe
+        run: pnpm --filter native exec tauri build --no-bundle
+
+      - name: Upload Magenta.exe
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          $exe = "apps\native\src-tauri\target\release\Magenta.exe"
+          if (-not (Test-Path $exe)) {
+            Get-ChildItem "apps\native\src-tauri\target\release" -Filter *.exe | Select-Object -ExpandProperty Name
+            throw "Magenta.exe was not produced"
+          }
+          $ready = $false
+          foreach ($try in 1..60) {
+            gh release view $tag --repo ${{ github.repository }} *> $null
+            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+            Start-Sleep -Seconds 20
+          }
+          if (-not $ready) {
+            gh release create $tag --repo ${{ github.repository }} --target "${{ github.sha }}" --title $tag --notes "Download Magenta.exe and run it."
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          gh release upload $tag $exe --repo ${{ github.repository }} --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $notes = @(
+            "Download Magenta.exe and run it."
+            ""
+            "First launch installs the CUDA engine and downloads the checkpoint. The part files on this release are the weights. There is no separate installer."
+            ""
+            "https://github.com/stepupgaming/magenta-windows/releases/latest/download/Magenta.exe"
+          ) -join "`n"
+          $notesPath = Join-Path $env:RUNNER_TEMP "magenta-notes.md"
+          [System.IO.File]::WriteAllText($notesPath, $notes)
+          gh release edit $tag --repo ${{ github.repository }} --notes-file $notesPath
+          gh release delete-asset $tag install.ps1 --repo ${{ github.repository }} -y
+          exit 0

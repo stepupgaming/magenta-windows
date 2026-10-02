@@ -16,12 +16,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [dependencies]
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-opener = "2"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

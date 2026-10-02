@@ -1,3 +1,5 @@
+mod bootstrap;
+
 use serde::Serialize;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -43,27 +45,8 @@ fn stop_engine(hold: &mut EngineHold) {
 }
 
 fn project_root() -> PathBuf {
-  let mut starts = Vec::new();
-  if let Ok(current) = std::env::current_dir() {
-    starts.push(current);
-  }
-  if let Ok(exe) = std::env::current_exe() {
-    if let Some(parent) = exe.parent() {
-      starts.push(parent.to_path_buf());
-    }
-  }
-  for start in starts {
-    let mut dir = start;
-    for _ in 0..8 {
-      if dir.join("engine").join("server.py").is_file() {
-        return dir;
-      }
-      if !dir.pop() {
-        break;
-      }
-    }
-  }
-  std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+  bootstrap::find_checkout()
+    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 fn python_for(root: &Path) -> PathBuf {
@@ -130,6 +113,59 @@ fn greet(name: &str) -> GreetResponse {
 #[tauri::command]
 fn engine_status() -> bool {
   engine_up()
+}
+
+#[tauri::command]
+fn bootstrap_status() -> String {
+  bootstrap::status()
+}
+
+#[cfg(windows)]
+fn bring_up(handle: &tauri::AppHandle) {
+  let state = handle.state::<EngineState>();
+  let root = {
+    let mut run = |program: &Path, args: &[&str], cwd: &Path, log: &Path| -> Result<(), String> {
+      let mut child = {
+        let hold = state.hold.lock().unwrap_or_else(|err| err.into_inner());
+        let Some(job) = hold.job.as_ref() else {
+          return Err("setup job is missing".to_string());
+        };
+        winjob::spawn_assigned(job, program, args, cwd, log)?
+      };
+      let status = child.wait().map_err(|err| err.to_string())?;
+      if status.success() {
+        Ok(())
+      } else {
+        Err(format!("{status}. See {}", log.display()))
+      }
+    };
+    match bootstrap::prepare(&mut run) {
+      Ok(root) => root,
+      Err(err) => {
+        bootstrap::set_status(&format!("Setup failed. {err}"));
+        return;
+      }
+    }
+  };
+  bootstrap::set_status("Starting the sound engine.");
+  let mut hold = state.hold.lock().unwrap_or_else(|err| err.into_inner());
+  if engine_up() {
+    if let Some(job) = hold.job.as_ref() {
+      winjob::adopt_listener(job);
+    }
+    bootstrap::set_status("");
+    return;
+  }
+  match hold.job.as_ref() {
+    Some(job) => match winjob::start_engine(&root, job) {
+      Ok(child) => {
+        hold.child = Some(child);
+        bootstrap::set_status("");
+      }
+      Err(err) => bootstrap::set_status(&format!("Engine failed to start. {err}")),
+    },
+    None => bootstrap::set_status("Engine failed to start. The process job is missing."),
+  }
 }
 
 #[cfg(windows)]
@@ -291,6 +327,52 @@ mod winjob {
       let _ = child.kill();
       let _ = child.wait();
       return Err(format!("NtResumeProcess {err}"));
+    }
+    Ok(child)
+  }
+
+  pub fn spawn_assigned(
+    job: &OwnedJob,
+    program: &Path,
+    args: &[&str],
+    cwd: &Path,
+    log_path: &Path,
+  ) -> Result<Child, String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    if let Some(parent) = log_path.parent() {
+      std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let log = std::fs::OpenOptions::new()
+      .create(true)
+      .append(true)
+      .open(log_path)
+      .map_err(|err| err.to_string())?;
+    let err_log = log.try_clone().map_err(|err| err.to_string())?;
+    let mut command = Command::new(program);
+    command
+      .args(args)
+      .current_dir(cwd)
+      .env_remove("PYTHONPATH")
+      .env_remove("VIRTUAL_ENV")
+      .stdin(Stdio::null())
+      .stdout(Stdio::from(log))
+      .stderr(Stdio::from(err_log))
+      .creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+    let mut child = command
+      .spawn()
+      .map_err(|err| format!("failed to start {}: {err}", program.display()))?;
+    if !job.assign(child.as_raw_handle()) {
+      let err = unsafe { GetLastError() };
+      let _ = child.kill();
+      let _ = child.wait();
+      return Err(format!("could not assign setup process to the job ({err})"));
+    }
+    if !resume_process(child.as_raw_handle()) {
+      let err = unsafe { GetLastError() };
+      let _ = child.kill();
+      let _ = child.wait();
+      return Err(format!("could not resume setup process ({err})"));
     }
     Ok(child)
   }
@@ -458,6 +540,7 @@ pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_opener::init())
     .setup(|app| {
+      #[allow(unused_mut)]
       let mut hold = EngineHold {
         child: None,
         #[cfg(windows)]
@@ -469,36 +552,33 @@ pub fn run() {
           }
         },
       };
-      let root = project_root();
-      if engine_up() {
-        #[cfg(windows)]
-        if let Some(job) = hold.job.as_ref() {
-          winjob::adopt_listener(job);
-        }
-      } else {
-        #[cfg(windows)]
-        match hold.job.as_ref() {
-          Some(job) => match winjob::start_engine(&root, job) {
+      #[cfg(not(windows))]
+      {
+        let root = project_root();
+        if !engine_up() {
+          match spawn_engine(&root, 0) {
             Ok(child) => hold.child = Some(child),
             Err(err) => eprintln!("magenta engine: {err}"),
-          },
-          None => match spawn_engine(&root, 0) {
-            Ok(child) => hold.child = Some(child),
-            Err(err) => eprintln!("magenta engine: {err}"),
-          },
-        }
-        #[cfg(not(windows))]
-        match spawn_engine(&root, 0) {
-          Ok(child) => hold.child = Some(child),
-          Err(err) => eprintln!("magenta engine: {err}"),
+          }
         }
       }
       app.manage(EngineState {
         hold: Mutex::new(hold),
       });
+      #[cfg(windows)]
+      {
+        let handle = app.handle().clone();
+        std::thread::Builder::new()
+          .name("magenta-setup".into())
+          .spawn(move || bring_up(&handle))?;
+      }
       Ok(())
     })
-    .invoke_handler(tauri::generate_handler![greet, engine_status])
+    .invoke_handler(tauri::generate_handler![
+      greet,
+      engine_status,
+      bootstrap_status
+    ])
     .build(tauri::generate_context!())
     .expect("error while building tauri application")
     .run(|app, event| {
