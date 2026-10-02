@@ -1,6 +1,6 @@
 [package]
 name = "magenta_2_windows"
-version = "0.1.0"
+version = "0.1.1"
 description = "Magenta2Windows"
 authors = ["stepupgaming"]
 edition = "2021"
