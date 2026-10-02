@@ -52,3 +52,7 @@ target/
 
 # Demo footage is not part of the player
 **/stage.mp4
+
+# Release weight parts are uploaded to GitHub. They are not source.
+release-weights/
+*.tgz

@@ -1,10 +1,31 @@
 {
-  "name": "magenta-2-windows",
+  "name": "magenta-windows",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
+  "bin": {
+    "magenta": "./bin/magenta.mjs"
+  },
+  "files": [
+    "bin",
+    "scripts/release_weights.py",
+    "engine/magenta_win/*.py",
+    "engine/server.py",
+    "engine/model_code",
+    "engine/pyproject.toml",
+    "engine/uv.lock",
+    "engine/.python-version",
+    "install.ps1",
+    "setup.ps1",
+    "magenta.cmd",
+    "README.md",
+    "LICENSE",
+    "AGENTS.md"
+  ],
   "scripts": {
     "build": "turbo build",
-    "dev": "turbo dev",
+    "dev": "node ./bin/dev.mjs",
+    "magenta": "node ./bin/magenta.mjs",
+    "start": "node ./bin/magenta.mjs serve",
     "check": "ultracite check",
     "fix": "ultracite fix",
     "clean": "turbo run clean",

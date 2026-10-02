@@ -21,17 +21,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-def _weight_cache() -> Path:
-    configured = os.environ.get("HUGGINGFACE_HUB_CACHE")
-    if configured:
-        return Path(configured)
-    local = Path(r"F:\Models\huggingface\hub")
-    if local.is_dir():
-        return local
-    return Path.home() / ".cache" / "huggingface" / "hub"
+from magenta_win.cache_path import weight_cache
 
-
-os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(_weight_cache()))
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(weight_cache()))
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 import numpy as np

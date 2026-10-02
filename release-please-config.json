@@ -7,8 +7,8 @@
   "packages": {
     ".": {
       "release-type": "node",
-      "package-name": "magenta-2-windows",
-      "component": "magenta-2-windows",
+      "package-name": "magenta-windows",
+      "component": "magenta-windows",
       "changelog-path": "CHANGELOG.md",
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,

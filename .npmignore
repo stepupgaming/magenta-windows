@@ -1,0 +1,13 @@
+node_modules
+.venv
+target
+dist
+.next
+.turbo
+__pycache__
+engine/outputs
+engine/logs
+*.wav
+*.mp4
+release-weights
+*.tgz
