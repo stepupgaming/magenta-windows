@@ -20,6 +20,16 @@ pnpm tauri dev
 
 `setup.ps1` creates `engine\.venv` and installs the JavaScript dependencies. In the window, click **Load model**. The first load also captures a CUDA graph, so sound starts a few seconds after the weights are ready. Type any description. Add lines. Set a weight on each one.
 
+The command line is `magenta`. From this folder:
+
+```powershell
+.\magenta.cmd --help
+.\magenta.cmd serve
+.\magenta.cmd generate --prompt "soothing chords" --prompt "dusty breakbeat:0.4" --seconds 8 --out take.wav
+```
+
+`serve` starts the CUDA server with the model unloaded. `load` puts the checkpoint on the GPU and leaves it there until `stop`. `generate` writes one wav in its own process and exits. `.\magenta.cmd --help` does not load the model.
+
 The base model on a 16 GB card finishes each chunk a little after the speaker clock. The player holds about a second of audio and stretches time slightly so the stream does not chop. Pitch stays put.
 
 The app shell is MIT. `engine/model_code` is an Apache-2.0 PyTorch port of `google/magenta-realtime-2`. The weight files stay under their Hugging Face license and are downloaded, not vendored.

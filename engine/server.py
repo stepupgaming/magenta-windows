@@ -362,6 +362,17 @@ def post_load() -> dict[str, Any]:
     return health()
 
 
+def _exit_soon() -> None:
+    time.sleep(0.3)
+    os._exit(0)
+
+
+@app.post("/shutdown")
+def post_shutdown() -> dict[str, bool]:
+    threading.Thread(target=_exit_soon, daemon=True).start()
+    return {"ok": True, "stopping": True}
+
+
 def apply_client_message(payload: dict[str, Any], spec: dict[str, Any]) -> tuple[dict[str, Any], str]:
     op = str(payload.get("op") or "")
     if op == "stop":
@@ -483,23 +494,11 @@ async def stream_ws(websocket: WebSocket) -> None:
             await asyncio.to_thread(lane.call, session.close)
 
 
-def run_smoke(seconds: float, output: Path) -> None:
+def render(spec: dict[str, Any], seconds: float, output: Path) -> None:
     import soundfile as sf
 
+    spec = clean_spec(spec)
     model = load_model()
-    spec = clean_spec(
-        {
-            "prompts": [
-                {"text": "techno", "weight": 0.65},
-                {"text": "soothing chords", "weight": 0.35},
-            ],
-            "temperature": 1.05,
-            "top_k": 48,
-            "cfg_musiccoca": 2.4,
-            "cfg_notes": 0.8,
-            "seed": 7,
-        }
-    )
     session = Session(model)
     try:
         print("[magenta] capturing CUDA graph", flush=True)
@@ -534,6 +533,29 @@ def run_smoke(seconds: float, output: Path) -> None:
         torch.cuda.empty_cache()
 
 
+def run_smoke(seconds: float, output: Path) -> None:
+    render(
+        {
+            "prompts": [
+                {"text": "techno", "weight": 0.65},
+                {"text": "soothing chords", "weight": 0.35},
+            ],
+            "temperature": 1.05,
+            "top_k": 48,
+            "cfg_musiccoca": 2.4,
+            "cfg_notes": 0.8,
+            "seed": 7,
+        },
+        seconds,
+        output,
+    )
+
+
+def serve(port: int) -> None:
+    print(f"[magenta] listening on 127.0.0.1:{port}", flush=True)
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Magenta Windows CUDA server")
     parser.add_argument("--smoke-seconds", type=float, default=0.0)
@@ -543,8 +565,7 @@ def main() -> None:
     if args.smoke_seconds > 0:
         run_smoke(args.smoke_seconds, args.out)
         return
-    print(f"[magenta] listening on 127.0.0.1:{args.port}", flush=True)
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="info")
+    serve(args.port)
 
 
 if __name__ == "__main__":
