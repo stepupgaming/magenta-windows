@@ -1,0 +1,401 @@
+{
+  "architectures": [
+    "MagentaRT2ForConditionalGeneration"
+  ],
+  "auto_map": {
+    "AutoConfig": "configuration_magenta_rt2.MagentaRT2Config",
+    "AutoModel": "modeling_magenta_rt2.MagentaRT2ForConditionalGeneration"
+  },
+  "cfg_drums": 1.0,
+  "cfg_musiccoca": 3.0,
+  "cfg_notes": 1.0,
+  "codebook_size": 1024,
+  "codec_param_shapes": {
+    "decoder_0__conv2d_3x3__conv__bias": [
+      1024
+    ],
+    "decoder_0__conv2d_3x3__conv__kernel": [
+      3,
+      3,
+      1024,
+      1024
+    ],
+    "decoder_0__conv2dtranspose_4x3__conv__bias": [
+      1024
+    ],
+    "decoder_0__conv2dtranspose_4x3__conv__kernel": [
+      4,
+      3,
+      512,
+      1024
+    ],
+    "decoder_0__shortcut_layer__conv1x1__conv__bias": [
+      1024
+    ],
+    "decoder_0__shortcut_layer__conv1x1__conv__kernel": [
+      1,
+      1,
+      512,
+      1024
+    ],
+    "decoder_1__conv2d_3x3__conv__bias": [
+      256
+    ],
+    "decoder_1__conv2d_3x3__conv__kernel": [
+      3,
+      3,
+      256,
+      256
+    ],
+    "decoder_1__conv2dtranspose_4x4__conv__bias": [
+      256
+    ],
+    "decoder_1__conv2dtranspose_4x4__conv__kernel": [
+      4,
+      4,
+      512,
+      256
+    ],
+    "decoder_1__shortcut_layer__conv1x1__conv__bias": [
+      256
+    ],
+    "decoder_1__shortcut_layer__conv1x1__conv__kernel": [
+      1,
+      1,
+      512,
+      256
+    ],
+    "decoder_2__conv2d_3x3__conv__bias": [
+      256
+    ],
+    "decoder_2__conv2d_3x3__conv__kernel": [
+      3,
+      3,
+      256,
+      256
+    ],
+    "decoder_2__conv2dtranspose_3x4__conv__bias": [
+      256
+    ],
+    "decoder_2__conv2dtranspose_3x4__conv__kernel": [
+      3,
+      4,
+      256,
+      256
+    ],
+    "decoder_3__conv2d_3x3__conv__bias": [
+      256
+    ],
+    "decoder_3__conv2d_3x3__conv__kernel": [
+      3,
+      3,
+      256,
+      256
+    ],
+    "decoder_3__conv2dtranspose_3x4__conv__bias": [
+      256
+    ],
+    "decoder_3__conv2dtranspose_3x4__conv__kernel": [
+      3,
+      4,
+      256,
+      256
+    ],
+    "decoder_4__conv2d_3x3__conv__bias": [
+      128
+    ],
+    "decoder_4__conv2d_3x3__conv__kernel": [
+      3,
+      3,
+      128,
+      128
+    ],
+    "decoder_4__conv2dtranspose_3x6__conv__bias": [
+      128
+    ],
+    "decoder_4__conv2dtranspose_3x6__conv__kernel": [
+      3,
+      6,
+      256,
+      128
+    ],
+    "decoder_4__shortcut_layer__conv1x1__conv__bias": [
+      128
+    ],
+    "decoder_4__shortcut_layer__conv1x1__conv__kernel": [
+      1,
+      1,
+      256,
+      128
+    ],
+    "decoder_5__conv2d_3x3__conv__bias": [
+      128
+    ],
+    "decoder_5__conv2d_3x3__conv__kernel": [
+      3,
+      3,
+      128,
+      128
+    ],
+    "decoder_5__conv2dtranspose_3x4__conv__bias": [
+      128
+    ],
+    "decoder_5__conv2dtranspose_3x4__conv__kernel": [
+      3,
+      4,
+      128,
+      128
+    ],
+    "decoder_6__conv2d_3x3__conv__bias": [
+      64
+    ],
+    "decoder_6__conv2d_3x3__conv__kernel": [
+      3,
+      3,
+      64,
+      64
+    ],
+    "decoder_6__conv2dtranspose_3x4__conv__bias": [
+      64
+    ],
+    "decoder_6__conv2dtranspose_3x4__conv__kernel": [
+      3,
+      4,
+      128,
+      64
+    ],
+    "decoder_6__shortcut_layer__conv1x1__conv__bias": [
+      64
+    ],
+    "decoder_6__shortcut_layer__conv1x1__conv__kernel": [
+      1,
+      1,
+      128,
+      64
+    ],
+    "input_layer__conv1x1_first__conv__bias": [
+      2560
+    ],
+    "input_layer__conv1x1_first__conv__kernel": [
+      1,
+      1,
+      256,
+      2560
+    ],
+    "input_layer__shortcut_layer__conv1x1_b1__conv__bias": [
+      2560
+    ],
+    "input_layer__shortcut_layer__conv1x1_b1__conv__kernel": [
+      1,
+      1,
+      256,
+      2560
+    ],
+    "input_layer__shortcut_layer__conv1x1_b2__conv__bias": [
+      2560
+    ],
+    "input_layer__shortcut_layer__conv1x1_b2__conv__kernel": [
+      1,
+      1,
+      2560,
+      2560
+    ],
+    "input_layers_residual_unit__conv2d_3x3__conv__bias": [
+      512
+    ],
+    "input_layers_residual_unit__conv2d_3x3__conv__kernel": [
+      3,
+      3,
+      512,
+      512
+    ],
+    "input_layers_residual_unit__conv2d_3x3_a__conv__bias": [
+      512
+    ],
+    "input_layers_residual_unit__conv2d_3x3_a__conv__kernel": [
+      3,
+      3,
+      512,
+      512
+    ],
+    "output_layer__base_conv_last__conv__bias": [
+      2
+    ],
+    "output_layer__base_conv_last__conv__kernel": [
+      7,
+      7,
+      64,
+      2
+    ]
+  },
+  "depth": [
+    6,
+    1024,
+    4096,
+    8,
+    128
+  ],
+  "depth_max_past": 12,
+  "dtype": "float32",
+  "encoder_model_dims": 1024,
+  "frame_samples": 1920,
+  "model_type": "magenta_rt2",
+  "musiccoca_embed_dim": 768,
+  "musiccoca_per_rvq_vocab": 1031,
+  "musiccoca_rvq": 12,
+  "num_codebooks": 12,
+  "num_drums": 1,
+  "num_notes": 128,
+  "num_reserved_tokens": 6,
+  "num_sinks": 1,
+  "regular_num_channels": 132,
+  "regular_num_embeddings_per_channel": [
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    11,
+    9,
+    47,
+    47,
+    15
+  ],
+  "sample_rate": 48000,
+  "size": "mrt2_base",
+  "soft_cap_logits": 30.0,
+  "temperature": 1.3,
+  "temporal": [
+    20,
+    3072,
+    8192,
+    24,
+    128
+  ],
+  "temporal_max_past": 25,
+  "top_k": 40,
+  "transformers_version": "5.8.0",
+  "vocab_size": 12294
+}
