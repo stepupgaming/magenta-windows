@@ -74,7 +74,11 @@ class CudaGraphStreamer:
         c = dec.cfg
         self.dec = dec
         self.Q, self.CB, self.NR = c.num_codebooks, c.codebook_size, c.num_reserved_tokens
-        self.KEEP = c.temporal_max_past + 1
+        # Past frames cached per layer. A step appends the current frame, so
+        # attention sees temporal_max_past + 1 frames: the window the model
+        # was trained with (sequence_layers' max_past_horizon excludes the
+        # current step).
+        self.KEEP = c.temporal_max_past
         self.num_neg = num_neg
         self.kmax = max(1, min(int(max_top_k), self.CB))
         dev, dt = source.device, decode_dtype

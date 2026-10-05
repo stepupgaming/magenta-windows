@@ -172,3 +172,20 @@ def test_a_closed_streamer_refuses_to_step() -> None:
     stream.close()
     with pytest.raises(RuntimeError):
         stream.step()
+
+
+def test_streamer_attends_the_trained_window() -> None:
+    """Greedy streaming must match the eager path, which trims to the window the
+    model was trained with, well past the point where the window fills."""
+    decoder = tiny_decoder()
+    warmup, frames = 13, 12
+    stream = CudaGraphStreamer(decoder, source(1), torch.float32, top_k=1, warmup=warmup, capture=False)
+    streamed = [stream.step()[0, 0].tolist() for _ in range(frames)]
+
+    def greedy(logits: torch.Tensor, _q: int, lo: int, hi: int) -> torch.Tensor:
+        return logits[..., lo:hi].argmax(-1) + lo
+
+    with torch.no_grad():
+        state = decoder.init_streaming(1, torch.device("cpu"))
+        eager = [decoder.step(state, source(1), sampler=greedy)[0][0, 0].tolist() for _ in range(warmup + frames)]
+    assert streamed == eager[warmup:]

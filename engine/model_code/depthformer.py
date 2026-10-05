@@ -314,7 +314,7 @@ class MultivariateDecoder(nn.Module):
         tstep = temporal_step or self.temporal_step_fn
         dstep = depth_step or self.depth_step_fn
         to, new_self, new_cross = tstep(state["prev"], state["self"], state["cross"], source_frame)
-        keep = cfg.temporal_max_past + 1
+        keep = cfg.temporal_max_past  # past frames; the next step appends the current one
         state["self"] = [(k[:, -keep:], v[:, -keep:]) for k, v in new_self]
         state["cross"] = [(k[:, -keep:], v[:, -keep:]) for k, v in new_cross]
         dd = cfg.depth
