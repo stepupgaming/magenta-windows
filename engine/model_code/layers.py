@@ -52,40 +52,39 @@ class JaxLinear(nn.Module):
 
 
 class RMSNorm(nn.Module):
-    """RMS norm with learned scale; reduction in fp32 (eps 1e-6)."""
+    """RMS norm with learned scale; reduction in fp32 (eps 1e-6).
+
+    `F.rms_norm` upcasts reduced-precision input to fp32, normalizes, and rounds
+    back to the input dtype in one fused kernel on CUDA, the same steps the
+    reference spells out as separate ops. The scale stays a separate multiply in
+    the input dtype, so rounding happens where the reference rounds."""
 
     def __init__(self, dim, eps=1e-6, use_scale=True):
         super().__init__()
         self.eps = eps
+        self.normalized_shape = (dim,)
         self.scale = nn.Parameter(torch.ones(dim)) if use_scale else None
 
     def forward(self, x):
-        dt = x.dtype
-        v = x.float()
-        v = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + self.eps)
-        v = v.to(dt)
+        v = F.rms_norm(x, self.normalized_shape, eps=self.eps)
         if self.scale is not None:
-            v = v * self.scale.to(dt)
+            v = v * self.scale.to(x.dtype)
         return v
 
 
 class LayerNorm(nn.Module):
-    """LayerNorm with scale+bias; reduction in fp32 (eps 1e-6)."""
+    """LayerNorm with scale+bias; reduction in fp32 (eps 1e-6). Fused like RMSNorm."""
 
     def __init__(self, dim, eps=1e-6):
         super().__init__()
         self.eps = eps
+        self.normalized_shape = (dim,)
         self.scale = nn.Parameter(torch.ones(dim))
         self.bias = nn.Parameter(torch.zeros(dim))
 
     def forward(self, x):
-        dt = x.dtype
-        v = x.float()
-        mean = v.mean(-1, keepdim=True)
-        var = (v - mean).pow(2).mean(-1, keepdim=True)
-        v = (v - mean) * torch.rsqrt(var + self.eps)
-        v = v.to(dt)
-        return v * self.scale.to(dt) + self.bias.to(dt)
+        v = F.layer_norm(x, self.normalized_shape, eps=self.eps)
+        return v * self.scale.to(x.dtype) + self.bias.to(x.dtype)
 
 
 def _query_scale_vector(per_dim_scale, units_per_head, dtype):
@@ -97,17 +96,43 @@ def _query_scale_vector(per_dim_scale, units_per_head, dtype):
     return torch.tensor(qscale, dtype=dtype, device=per_dim_scale.device if per_dim_scale is not None else None)
 
 
-def dot_product_attention(q, k, v, per_dim_scale, sink_k, sink_v, mask):
+class _QueryScale:
+    """Caches the per-dim query scale, a fixed function of `per_dim_scale`.
+
+    Recomputing softplus on every attention call costs kernels per layer per
+    frame for a value that only changes when the weights do. The cache key holds
+    the parameter's version counter and storage, so loading or moving weights
+    recomputes it."""
+
+    _query_scale_cache = None
+
+    def query_scale(self, dtype):
+        p = self.per_dim_scale
+        if p is None or torch.compiler.is_compiling():  # export and compile trace the plain math
+            return _query_scale_vector(p, self.units_per_head, dtype)
+        key = (dtype, p.dtype, p.device, p.data_ptr(), p._version)
+        cached = self._query_scale_cache
+        if cached is None or cached[0] != key:
+            with torch.no_grad():
+                cached = (key, _query_scale_vector(p, self.units_per_head, dtype))
+            self._query_scale_cache = cached
+        return cached[1]
+
+
+def dot_product_attention(q, k, v, per_dim_scale, sink_k, sink_v, mask, query_scale=None):
     """q,k,v: [b, t, nh, uph]; mask: [b, 1, tq, tkv] bool (True=attend) or None.
 
     sink_k/sink_v: [num_sink, nh, uph] or None. Sink logits use *unscaled* queries.
+    query_scale: the precomputed `_query_scale_vector`, when the caller caches it.
     Returns context [b, tq, nh, uph].
     """
     qh = q.transpose(1, 2)  # [b, nh, tq, uph]
     kh = k.transpose(1, 2)
     vh = v.transpose(1, 2)
 
-    scale_vec = _query_scale_vector(per_dim_scale, q.shape[-1], qh.dtype)  # [uph]
+    scale_vec = query_scale  # [uph]
+    if scale_vec is None:
+        scale_vec = _query_scale_vector(per_dim_scale, q.shape[-1], qh.dtype)
 
     if sink_k is not None:
         # [b, nh, tq, num_sink] using unscaled queries.
@@ -141,7 +166,7 @@ def dot_product_attention(q, k, v, per_dim_scale, sink_k, sink_v, mask):
     return ctx.transpose(1, 2)  # [b, tq, nh, uph]
 
 
-class AttnProjection(nn.Module):
+class AttnProjection(_QueryScale, nn.Module):
     """q/k/v/out projections stored as [in, nh, uph] (Linen attention kernels)."""
 
     def __init__(self, in_dim, num_heads, units_per_head, has_sinks=False, has_per_dim_scale=True):
@@ -195,7 +220,8 @@ class SelfAttention(nn.Module):
         t = x.shape[1]
         mask = banded_causal_mask(t, t, self.max_past_horizon, 0, x.device)
         ctx = dot_product_attention(q, k, v, a.per_dim_scale,
-                                    a.sink_key_embeddings, a.sink_value_embeddings, mask)
+                                    a.sink_key_embeddings, a.sink_value_embeddings, mask,
+                                    query_scale=a.query_scale(q.dtype))
         out = torch.einsum("btnh,dnh->btd", ctx, self.output_projection_kernel.to(ctx.dtype))
         return self.post_norm(out)
 
@@ -227,7 +253,8 @@ class SelfAttention(nn.Module):
         # The cache holds only the last `keep` keys, all valid past keys within
         # the window for the single newest query -> no mask needed.
         ctx = dot_product_attention(q, kk, vv, a.per_dim_scale,
-                                    a.sink_key_embeddings, a.sink_value_embeddings, None)
+                                    a.sink_key_embeddings, a.sink_value_embeddings, None,
+                                    query_scale=a.query_scale(q.dtype))
         out = torch.einsum("btnh,dnh->btd", ctx, self.output_projection_kernel.to(ctx.dtype))
         return x + self.post_norm(out)
 
@@ -240,7 +267,8 @@ class SelfAttention(nn.Module):
         k = torch.cat([k_prev, a.project(h, a.key_projection_kernel)], dim=1)
         v = torch.cat([v_prev, a.project(h, a.value_projection_kernel)], dim=1)
         ctx = dot_product_attention(q, k, v, a.per_dim_scale,
-                                    a.sink_key_embeddings, a.sink_value_embeddings, None)
+                                    a.sink_key_embeddings, a.sink_value_embeddings, None,
+                                    query_scale=a.query_scale(q.dtype))
         out = torch.einsum("btnh,dnh->btd", ctx, self.output_projection_kernel.to(ctx.dtype))
         return x + self.post_norm(out), k, v
 
@@ -276,7 +304,8 @@ class CrossAttention(nn.Module):
         # query at decoder time i attends source positions within past horizon, causal.
         mask = banded_causal_mask(tq, tkv, self.max_past_horizon, 0, x.device)
         ctx = dot_product_attention(q, k, v, a.per_dim_scale,
-                                    a.sink_key_embeddings, a.sink_value_embeddings, mask)
+                                    a.sink_key_embeddings, a.sink_value_embeddings, mask,
+                                    query_scale=a.query_scale(q.dtype))
         out = torch.einsum("btnh,dnh->btd", ctx, self.output_projection_kernel.to(ctx.dtype))
         return self.post_norm(out)
 
@@ -289,7 +318,8 @@ class CrossAttention(nn.Module):
         a = self.attention
         q = torch.einsum("btd,dnh->btnh", h, a.query_projection_kernel.to(h.dtype))
         ctx = dot_product_attention(q, k, v, a.per_dim_scale,
-                                    a.sink_key_embeddings, a.sink_value_embeddings, None)
+                                    a.sink_key_embeddings, a.sink_value_embeddings, None,
+                                    query_scale=a.query_scale(q.dtype))
         out = torch.einsum("btnh,dnh->btd", ctx, self.output_projection_kernel.to(ctx.dtype))
         return x + self.post_norm(out)
 
@@ -305,15 +335,17 @@ class CrossAttention(nn.Module):
             k = k[:, -keep:]
             v = v[:, -keep:]
         ctx = dot_product_attention(q, k, v, a.per_dim_scale,
-                                    a.sink_key_embeddings, a.sink_value_embeddings, None)
+                                    a.sink_key_embeddings, a.sink_value_embeddings, None,
+                                    query_scale=a.query_scale(q.dtype))
         out = torch.einsum("btnh,dnh->btd", ctx, self.output_projection_kernel.to(ctx.dtype))
         return x + self.post_norm(out)
 
 
-class _CrossProj(nn.Module):
+class _CrossProj(_QueryScale, nn.Module):
     def __init__(self, q_dim, kv_dim, num_heads, units_per_head, has_sinks=False):
         super().__init__()
         nh, uph = num_heads, units_per_head
+        self.units_per_head = uph
         self.query_projection_kernel = nn.Parameter(torch.zeros(q_dim, nh, uph))
         self.key_projection_kernel = nn.Parameter(torch.zeros(kv_dim, nh, uph))
         self.value_projection_kernel = nn.Parameter(torch.zeros(kv_dim, nh, uph))

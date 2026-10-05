@@ -32,6 +32,9 @@ import torch
 # match the native range — but we warn once so the caller knows the risk.
 GUIDANCE_CFG_WARN = 3.5
 
+# The most candidates `set_top_k` can choose between without a re-capture.
+MAX_TOP_K = 256
+
 
 def _warn_high_cfg(*scales):
     hi = [round(float(s), 2) for s in scales if float(s) > GUIDANCE_CFG_WARN]
@@ -52,35 +55,48 @@ class CudaGraphStreamer:
     snapshots them into static buffers, then captures one frame (temporal + depth +
     sampler) with `torch.cuda.graph`. `.step()` replays it (one GPU dispatch) and
     returns the new frame tokens. Live steering writes into static input buffers
-    (`source`, `cfg`, `temperature`) — the captured graph reads them, no re-capture.
-    Conditioning changes ramp in via the windowed cross-KV (optional hard flush)."""
+    (`source`, `cfg`, `temperature`, top-k) — the captured graph reads them, no
+    re-capture. Conditioning changes ramp in via the windowed cross-KV (optional
+    hard flush). `snapshot()`/`restore()` save and reload the model's memory.
+
+    capture=False skips the graph and runs each frame eagerly. That is slow, but
+    it runs anywhere, including the CPU, which is how the tests exercise it."""
 
     def __init__(self, decoder, source, decode_dtype, num_neg=0, cfg_scales=None,
-                 temperature=1.1, top_k=50, seed=0, warmup=None):
+                 temperature=1.1, top_k=50, seed=0, warmup=None, max_top_k=MAX_TOP_K,
+                 capture=True):
         """decoder: a MultivariateDecoder (`model.depthformer.decoder` for the
         modeling class, `model.model.decoder` for the system class). `source` is the
         pre-encoded conditioning [B, Tc, enc] (B = 1 + num_neg); `decode_dtype` the
-        compute dtype. Class-agnostic so both model wrappers can build it."""
+        compute dtype. Class-agnostic so both model wrappers can build it.
+        max_top_k bounds what `set_top_k` accepts later."""
         dec = decoder
         c = dec.cfg
         self.dec = dec
         self.Q, self.CB, self.NR = c.num_codebooks, c.codebook_size, c.num_reserved_tokens
         self.KEEP = c.temporal_max_past + 1
         self.num_neg = num_neg
-        self.top_k = int(top_k)
+        self.kmax = max(1, min(int(max_top_k), self.CB))
         dev, dt = source.device, decode_dtype
         B = source.shape[0]; self.B = B
         # live-steering static inputs
         self.source = source.clone()
+        # Cross-attention K/V of the source, computed when the source changes
+        # instead of on every frame.
+        self.source_kv = [(k.clone(), v.clone()) for k, v in dec.source_kv(self.source)]
         self.cfg = (torch.zeros(0, device=dev, dtype=torch.float32) if not num_neg
                     else torch.tensor([float(s) for s in cfg_scales], device=dev, dtype=torch.float32))
         self.temp = torch.tensor(float(temperature), device=dev, dtype=torch.float32)
+        # Index of the k-th largest logit among the top `kmax`, so top-k is live.
+        self.kth = torch.zeros(1, 1, 1, device=dev, dtype=torch.long)
+        self.set_top_k(top_k)
         torch.manual_seed(seed)
         # 1) prime to steady state (KV == KEEP on every layer)
         st = dec.init_streaming_f(B, dev, dt)
         K = self.KEEP
         for _ in range(K + 8 if warmup is None else warmup):
-            to, ns, nc = dec.temporal_step_fn(st["prev"], st["self"], st["cross"], self.source)
+            to, ns, nc = dec.temporal_step_fn(st["prev"], st["self"], st["cross"], self.source,
+                                              self.source_kv)
             st["self"] = [(k[:, -K:], v[:, -K:]) for k, v in ns]
             st["cross"] = [(k[:, -K:], v[:, -K:]) for k, v in nc]
             frame = self._depth_sample(to)
@@ -91,6 +107,10 @@ class CudaGraphStreamer:
         self.CK = [st["cross"][i][0].clone() for i in range(L)]; self.CV = [st["cross"][i][1].clone() for i in range(L)]
         self.prev = st["prev"].clone()
         self.out = torch.zeros(1, 1, self.Q, dtype=torch.long, device=dev)
+        self.eager = not capture
+        self.graph = None
+        if self.eager:
+            return
         # 3) capture (side-stream warmup is required before graph capture)
         s = torch.cuda.Stream(); s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
@@ -108,13 +128,13 @@ class CudaGraphStreamer:
         dk = [(z, z) for _ in range(dd.num_layers)]
         di = to; toks = []
         for q in range(Q):
-            logits, dk = dec.depth_step_fn(di, dk)            # [B,1,V]
+            ls, dk = dec.depth_step_fn(di, dk, codebook=q)    # [B,1,CB], codebook q only
             lo = NR + q * CB
-            ls = logits[..., lo:lo + CB]
             cond = ls[0:1]; comb = cond
             for i in range(self.num_neg):                     # classifier-free guidance combine
                 comb = comb + self.cfg[i] * (cond - ls[i + 1:i + 2])
-            kth = torch.topk(comb, self.top_k, dim=-1).values[..., -1:]
+            ranked = torch.topk(comb, self.kmax, dim=-1).values   # descending
+            kth = ranked.gather(-1, self.kth)                     # the k-th largest
             comb = torch.where(comb >= kth, comb, torch.full_like(comb, -1e9))
             u = torch.rand(1, 1, CB, device=to.device, dtype=torch.float32)   # graph-safe RNG
             g = -torch.log(-torch.log(u.clamp(1e-10, 1 - 1e-7)))
@@ -127,7 +147,7 @@ class CudaGraphStreamer:
         dec = self.dec; K = self.KEEP; L = self.L
         to, ns, nc = dec.temporal_step_fn(
             self.prev, [(self.SK[i], self.SV[i]) for i in range(L)],
-            [(self.CK[i], self.CV[i]) for i in range(L)], self.source)
+            [(self.CK[i], self.CV[i]) for i in range(L)], self.source, self.source_kv)
         for i in range(L):
             self.SK[i].copy_(ns[i][0][:, -K:]); self.SV[i].copy_(ns[i][1][:, -K:])
             self.CK[i].copy_(nc[i][0][:, -K:]); self.CV[i].copy_(nc[i][1][:, -K:])
@@ -146,24 +166,73 @@ class CudaGraphStreamer:
     def set_temperature(self, t):
         self.temp.fill_(float(t))
 
+    def set_top_k(self, k):
+        """Sample from the k most likely tokens, 1 <= k <= max_top_k."""
+        self.top_k = max(1, min(int(k), self.kmax))
+        self.kth.fill_(self.top_k - 1)
+
+    def set_seed(self, seed):
+        """Restart the sampler's random stream from `seed`. A graph replay reads
+        the generator's current seed and offset, so this needs no re-capture."""
+        if self.source.is_cuda:
+            torch.cuda.manual_seed(int(seed))
+        else:
+            torch.manual_seed(int(seed))
+
     def set_source(self, source, flush=False):
         """Update conditioning. Ramps in via the windowed cross-KV; flush=True
         overwrites all cross-KV slots for an immediate change."""
         self.source.copy_(source if source.shape[0] == self.B else source.expand(self.B, -1, -1))
+        for (k, v), (nk, nv) in zip(self.source_kv, self.dec.source_kv(self.source)):
+            k.copy_(nk); v.copy_(nv)
         if flush:
             for i in range(self.L):
-                sk, sv = self.dec.temporal_body.layers[i]["cross_attention"]._kv(self.source)
+                sk, sv = self.source_kv[i]
                 self.CK[i].copy_(sk[:, -self.KEEP:]); self.CV[i].copy_(sv[:, -self.KEEP:])
+
+    # ---- memory ----
+    def snapshot(self):
+        """Copy the model's memory: temporal self/cross KV and the last frame.
+        About 13 MB for the base model."""
+        return {
+            "self": [(k.clone(), v.clone()) for k, v in zip(self.SK, self.SV)],
+            "cross": [(k.clone(), v.clone()) for k, v in zip(self.CK, self.CV)],
+            "prev": self.prev.clone(),
+        }
+
+    def restore(self, memory):
+        """Load a `snapshot()` back into the buffers the graph reads. The next
+        frame continues from that moment. Raises ValueError if it came from a
+        streamer of a different shape, before changing anything."""
+        pairs = [(self.SK, self.SV, memory["self"]), (self.CK, self.CV, memory["cross"])]
+        for keys, values, saved in pairs:
+            if len(saved) != self.L:
+                raise ValueError("memory snapshot has a different number of layers")
+            for key, value, (saved_key, saved_value) in zip(keys, values, saved):
+                if saved_key.shape != key.shape or saved_value.shape != value.shape:
+                    raise ValueError("memory snapshot does not match this streamer")
+        if memory["prev"].shape != self.prev.shape:
+            raise ValueError("memory snapshot does not match this streamer")
+        for keys, values, saved in pairs:
+            for key, value, (saved_key, saved_value) in zip(keys, values, saved):
+                key.copy_(saved_key); value.copy_(saved_value)
+        self.prev.copy_(memory["prev"])
 
     def step(self):
         """Advance one frame (single CUDA-graph dispatch). Returns tokens [1,1,Q]."""
-        self.graph.replay()
+        if self.eager:
+            self._frame_static()
+        elif self.graph is None:
+            raise RuntimeError("the streamer is closed")
+        else:
+            self.graph.replay()
         return self.out.clone()
 
     def close(self):
         """Free the captured CUDA graph + its private memory pool. Idempotent;
         call at session end (the WS worker should). Safe during interpreter
         shutdown — swallows teardown-ordering errors."""
+        self.eager = False
         g = getattr(self, "graph", None)
         if g is not None:
             try:
@@ -179,4 +248,4 @@ class CudaGraphStreamer:
             pass
 
 
-__all__ = ["CudaGraphStreamer", "GUIDANCE_CFG_WARN"]
+__all__ = ["CudaGraphStreamer", "GUIDANCE_CFG_WARN", "MAX_TOP_K"]

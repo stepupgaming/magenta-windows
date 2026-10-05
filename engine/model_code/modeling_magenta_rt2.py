@@ -498,8 +498,8 @@ class MagentaRT2ForConditionalGeneration(MagentaRT2PreTrainedModel):
         (temporal + N-codebook depth + in-graph sampler + optional CFG) as a single
         `torch.cuda.graph` replay over fixed-size static KV buffers — ~MLX `.mlxfn`.
         Returns a `CudaGraphStreamer`; call `.step()` for the next frame [1,1,Q]
-        (decode with `decode_stream`), and `.set_cfg/.set_temperature/.set_source`
-        for live steering (no re-capture). `top_k` is fixed at capture time."""
+        (decode with `decode_stream`), and `.set_cfg/.set_temperature/.set_source/
+        .set_top_k/.set_seed` for live steering (no re-capture)."""
         if guidance:
             source, scales = self._guidance_source(style, notes, drums, cfg_musiccoca, cfg_notes)
             num_neg = len(scales)
