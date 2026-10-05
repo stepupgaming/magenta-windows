@@ -40,7 +40,7 @@ const IDEAS: [string, string][] = [
   ],
   [
     "Style detail",
-    "A blended style reaches the model as 12 tokens, from broad to fine. Google's apps let only the 6 broadest steer. Turn Style detail up to follow each prompt more exactly, or down for a looser reading.",
+    "A blended style reaches the model as 12 tokens, from broad to fine, and all 12 steer by default. Turn Style detail down for a looser reading of each prompt.",
   ],
   [
     "Notes",

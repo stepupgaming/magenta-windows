@@ -135,7 +135,9 @@ def test_style_detail_masks_the_finer_tokens(session: Any) -> None:
     full = session._style_tokens(spec(style_levels=12))
     assert -1 not in full
     assert session._style_tokens(spec(style_levels=4)) == full[:4] + [-1] * 8
-    assert session._style_tokens(spec()) == full[:6] + [-1] * 6
+    assert session._style_tokens(spec(style_levels=6)) == full[:6] + [-1] * 6
+    # All 12 steer by default, as in Google's Python engines.
+    assert session._style_tokens(spec()) == full
 
 
 def test_choices_and_seed_change_without_a_restart(session: Any) -> None:
@@ -170,7 +172,7 @@ def test_revive_returns_to_the_primed_memory(session: Any) -> None:
 
 
 def test_clean_spec_reads_style_detail() -> None:
-    assert server.clean_spec({})["style_levels"] == 6
+    assert server.clean_spec({})["style_levels"] == 12
     assert server.clean_spec({"style_levels": 40})["style_levels"] == 12
     assert server.clean_spec({"style_levels": 0})["style_levels"] == 1
 

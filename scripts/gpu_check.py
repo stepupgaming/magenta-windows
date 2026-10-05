@@ -416,7 +416,7 @@ async def live_stream(minutes: float, smi: str | None, out_dir: Path) -> Live:
         "top_k": 48,
         "seed": 1,
         "drums": "auto",
-        "style_levels": 6,
+        "style_levels": 12,
     }
 
     # A continue's lead-in arrives as one message of up to 8 s, past the 1 MiB default.

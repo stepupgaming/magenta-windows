@@ -50,10 +50,12 @@ FRAMES_PER_SECOND = 25
 SAMPLES_PER_FRAME = SAMPLE_RATE // FRAMES_PER_SECOND
 PORT = int(os.environ.get("MAGENTA_PORT", "8765"))
 STYLE_TOKENS = 12
-# Google's engine steers with only the 6 coarsest of the 12 style tokens and
-# masks the finer ones. The model was trained with random masking of that tail,
-# so fewer levels is an input it knows.
-STYLE_LEVELS = 6
+# How many of the 12 style tokens steer by default: all of them, as in Google's
+# Python engines (magenta_rt/jax and mlx), which condition on style strength as
+# a token the way this engine does. Google's C++ app engine keeps only the 6
+# coarsest, but it pairs them with true classifier-free guidance, which pushes
+# harder on what is left. Here 6 weakened the prompt and sounded generic.
+STYLE_LEVELS = 12
 # Remembered grooves kept per stream: one per scene, plus room to spare.
 GROOVES_KEPT = 16
 AUDIO_PROMPT_RATE = 16_000

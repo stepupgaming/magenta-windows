@@ -79,10 +79,10 @@ describe("blendScenes", () => {
   });
 
   it("steps style detail and fills it in for older scenes", () => {
-    const fine = scene([prompt("shared", 1)], { styleDetail: 12 });
-    expect(blendScenes(from, fine, 0.5).styleDetail).toBe(9);
-    expect(blendScenes(fine, from, 1).styleDetail).toBe(6);
-    expect(blendScenes(from, fine, 1).styleDetail).toBe(12);
+    const loose = scene([prompt("shared", 1)], { styleDetail: 4 });
+    expect(blendScenes(from, loose, 0.5).styleDetail).toBe(8);
+    expect(blendScenes(loose, from, 1).styleDetail).toBe(12);
+    expect(blendScenes(from, loose, 1).styleDetail).toBe(4);
   });
 
   it("treats a muted source prompt as silent", () => {
