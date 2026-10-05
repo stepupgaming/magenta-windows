@@ -257,7 +257,7 @@ class Voice {
       .join("|");
     const seed = hash(style || "free");
     const harmonics = 1 + (seed % 5);
-    const detail = Math.min(12, Math.max(1, spec.style_levels ?? 6)) / 12;
+    const detail = Math.min(12, Math.max(1, spec.style_levels ?? 12)) / 12;
     const brightness = (0.25 + ((seed >> 8) % 60) / 100) * (0.5 + detail);
     const wobble = Math.max(0, (spec.temperature ?? 1) - 0.8) * 0.004;
     const pitches = this.pitches(spec);

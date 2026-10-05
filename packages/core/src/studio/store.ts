@@ -27,12 +27,45 @@ export const MODEL_DEFAULTS = {
   drumStrength: 1,
   noteStrength: 0.8,
   seed: 7,
-  /** Style tokens that steer, coarsest first. Google's apps use 6 of 12. */
-  styleDetail: 6,
+  /** Style tokens that steer, coarsest first: all 12, as in Google's Python engines. */
+  styleDetail: 12,
   styleStrength: 2.4,
   temperature: 1.05,
   topK: 48,
 } as const;
+
+/** Settings saved before version 2 defaulted to 6 style tokens. */
+const OLD_STYLE_DETAIL_DEFAULT = 6;
+
+const liftStyleDetail = (detail: number): number =>
+  detail === OLD_STYLE_DETAIL_DEFAULT ? MODEL_DEFAULTS.styleDetail : detail;
+
+/**
+ * Version 1 defaulted style detail to 6, which weakened prompts on this engine,
+ * so a saved 6, the old default, moves to all 12. Any other value was chosen
+ * and stays. Scenes keep their own style detail and move the same way.
+ */
+export function migrateStudioSettings(
+  persisted: unknown,
+  version: number
+): Partial<StudioSettings> {
+  const saved = (persisted ?? {}) as Partial<StudioSettings>;
+  if (version >= 2) {
+    return saved;
+  }
+  const migrated: Partial<StudioSettings> = { ...saved };
+  if (saved.styleDetail !== undefined) {
+    migrated.styleDetail = liftStyleDetail(saved.styleDetail);
+  }
+  if (saved.scenes) {
+    migrated.scenes = saved.scenes.map((scene) =>
+      scene?.styleDetail === undefined
+        ? scene
+        : { ...scene, styleDetail: liftStyleDetail(scene.styleDetail) }
+    );
+  }
+  return migrated;
+}
 
 export const FX_DEFAULTS: FxState = {
   delayDivision: 0.75,
@@ -320,9 +353,10 @@ export const useStudio = create<StudioState>()(
           ),
         };
       },
+      migrate: migrateStudioSettings,
       skipHydration: true,
       storage: createJSONStorage(debouncedStorage),
-      version: 1,
+      version: 2,
     }
   )
 );

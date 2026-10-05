@@ -36,7 +36,7 @@ export function ModelPanel() {
         />
         <Knob
           color="#ff6fa6"
-          hint="How many of the 12 style tokens steer, coarsest first. Google's apps use 6. More follows each prompt more exactly."
+          hint="How many of the 12 style tokens steer, coarsest first. All 12 follow each prompt most exactly; fewer give a looser reading."
           label="Style detail"
           paramId="model.detail"
         />

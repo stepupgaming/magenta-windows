@@ -7,9 +7,11 @@ level and tonal balance. Every variant runs on the same seeds:
 
   old     the v0.1.1 engine: no text mapper, all 12 style tokens, a 27-frame
           attention window, and the code from before the speed work.
-  as-old  today's engine with v0.1.1's prompt handling (MAGENTA_TEXT_MAPPER=off
-          and --style-detail 12), so only the engine's own changes differ.
-  new     today's engine as it ships: Google's text mapper and 6 style tokens.
+  as-old  today's engine with v0.1.1's prompt handling (MAGENTA_TEXT_MAPPER=off),
+          so only the engine's own changes differ.
+  new     today's engine as it ships: Google's text mapper and all 12 style tokens.
+
+Every variant gets the same drums: auto by default, which lets the model decide.
 
 Old and new sample differently, so a seed does not give the same music in both.
 Compare the sound across seeds, not note for note.
@@ -139,7 +141,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompt", action="append", default=[], help='Prompt, repeatable. Default: "techno".')
     parser.add_argument("--seconds", type=float, default=20.0)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS))
-    parser.add_argument("--drums", action="store_true", help="Ask every render for drums.")
+    parser.add_argument(
+        "--drums",
+        choices=("auto", "off"),
+        default="auto",
+        help="auto lets the model decide, as generate and the window now do; off asks for none, v0.1.1's generate default.",
+    )
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
@@ -162,15 +169,23 @@ def main(argv: list[str] | None = None) -> int:
 
     worktree = out_dir / "v0.1.1"
     old_engine = checkout_old(worktree)
+    # The same drums for every engine: v0.1.1 took a bare --drums as "let the
+    # model decide" and used no drum strength without it.
+    if args.drums == "auto":
+        old_drums: tuple[str, ...] = ("--drums",)
+        new_drums: tuple[str, ...] = ("--drums", "auto")
+    else:
+        old_drums = ()
+        new_drums = ("--drums", "off", "--drum-strength", "0")
     variants = [
-        Variant("as-old", ENGINE, ("--style-detail", "12"), {"MAGENTA_TEXT_MAPPER": "off"}),
-        Variant("new", ENGINE),
+        Variant("as-old", ENGINE, ("--style-detail", "12", *new_drums), {"MAGENTA_TEXT_MAPPER": "off"}),
+        Variant("new", ENGINE, new_drums),
     ]
     if old_engine is not None:
-        variants.insert(0, Variant("old", old_engine))
+        variants.insert(0, Variant("old", old_engine, old_drums))
 
     base = [flag for prompt in prompts for flag in ("--prompt", prompt)]
-    base += ["--seconds", f"{args.seconds:g}"] + (["--drums"] if args.drums else [])
+    base += ["--seconds", f"{args.seconds:g}"]
     sounds: dict[str, list[Sound]] = {}
     rows: list[str] = []
     try:
@@ -203,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     header = " ".join(f"{name:>5s}" for name in BAND_NAMES)
     report = [
         f"Magenta A/B, {datetime.now().astimezone():%Y-%m-%d %H:%M}",
-        f"Prompt: {' + '.join(prompts)}, {args.seconds:g} s{', drums on' if args.drums else ''}",
+        f"Prompt: {' + '.join(prompts)}, {args.seconds:g} s, drums {args.drums}",
         "",
         "old = v0.1.1 engine. as-old = today's engine with v0.1.1's prompt handling. new = today's engine.",
         "Bands are dB below each file's loudest octave. Level and peak are dBFS.",
@@ -213,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         "",
         "Brightness, the median over seeds of the bands from 1.3 kHz up:",
         compare(sounds, "old", "as-old", "my engine changes: the attention window, the speed work and the sampling"),
-        compare(sounds, "as-old", "new", "the prompt handling: Google's text mapper and 6 style tokens"),
+        compare(sounds, "as-old", "new", "Google's text mapper"),
         "",
         "Listen in order for each seed: old, as-old, new. A seed is not the same music in old and new,",
         "so judge the sound (scratchy, metallic, booming), not the notes.",

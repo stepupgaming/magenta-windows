@@ -14,6 +14,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+# The server's drum modes, kept here so --help never imports PyTorch.
+DRUM_MODES = ("auto", "on", "off")
+
 
 class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
     pass
@@ -114,9 +117,9 @@ def build_spec(args: argparse.Namespace) -> dict[str, Any]:
         "top_k": int(args.top_k),
         "cfg_musiccoca": float(args.style),
         "cfg_notes": float(args.note_strength),
-        "cfg_drums": float(args.drum_strength) if args.drums else 0.0,
+        "cfg_drums": float(args.drum_strength),
         "notes": held_notes(list(args.note)),
-        "drums": bool(args.drums),
+        "drums": args.drums,
         "seed": int(args.seed),
         "style_levels": int(args.style_detail),
     }
@@ -309,12 +312,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--style-detail",
         dest="style_detail",
         type=int,
-        default=6,
-        help="How many of the 12 style tokens steer, coarsest first, from 1 to 12. Google's apps use 6.",
+        default=12,
+        help="How many of the 12 style tokens steer, coarsest first, from 1 to 12. Fewer follows the prompt more loosely.",
     )
     generate.add_argument("--note-strength", type=float, default=0.8, help="How hard held notes steer, from 0 to 6.")
-    generate.add_argument("--drums", action="store_true", help="Turn the drum conditioning on.")
-    generate.add_argument("--drum-strength", type=float, default=1.0, help="Drum steer, from 0 to 4. Used only with --drums.")
+    generate.add_argument(
+        "--drums",
+        nargs="?",
+        const="on",
+        default="auto",
+        choices=DRUM_MODES,
+        help="auto lets the model decide, as the window does; on asks for drums (a bare --drums), off asks for none.",
+    )
+    generate.add_argument("--drum-strength", type=float, default=1.0, help="Drum steer, from 0 to 4.")
     generate.add_argument("--note", action="append", type=int, default=[], help="MIDI note held for the whole file, from 0 to 127. Repeat to stack notes.")
     generate.add_argument("--seed", type=int, default=7, help="Sampler seed.")
     generate.add_argument(
