@@ -28,6 +28,8 @@ function health() {
     model_loaded: loaded,
     ok: true,
     sample_rate: RATE,
+    text_mapper: "off",
+    text_mapper_detail: "The mock engine has no model to refine prompts for.",
   };
 }
 

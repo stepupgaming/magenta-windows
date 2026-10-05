@@ -91,6 +91,9 @@ export interface FxState {
   reverbSize: number;
 }
 
+/** How the engine refines text prompts before blending, as upstream does. */
+export type TextMapperState = "off" | "on" | "pending" | "unavailable";
+
 export interface EngineHealth {
   backend: string;
   error: string | null;
@@ -98,6 +101,9 @@ export interface EngineHealth {
   model_loaded: boolean;
   ok: boolean;
   sample_rate: number;
+  /** Absent on engines that predate the text mapper. */
+  text_mapper?: TextMapperState;
+  text_mapper_detail?: string;
 }
 
 export type EnginePhase =

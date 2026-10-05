@@ -9,7 +9,8 @@ import { Download, Settings2, Upload } from "lucide-react";
 import { useRef } from "react";
 import { toast } from "sonner";
 import { exportSession, importSession } from "../actions.ts";
-import { useStudio } from "../store.ts";
+import { useLive, useStudio } from "../store.ts";
+import type { EngineHealth, TextMapperState } from "../types.ts";
 import { Hint, Toggle } from "./kit.tsx";
 
 const BUFFERS = [
@@ -18,6 +19,60 @@ const BUFFERS = [
   { label: "Safe", seconds: 1.5 },
   { label: "Solid", seconds: 2.5 },
 ];
+
+const MAPPER_COPY: Record<TextMapperState, { label: string; tone: string }> = {
+  off: { label: "Off", tone: "text-white/50" },
+  on: { label: "On", tone: "text-emerald-300" },
+  pending: { label: "Loads with the model", tone: "text-white/50" },
+  unavailable: { label: "Unavailable", tone: "text-amber-200" },
+};
+
+function mapperSummary(health: EngineHealth | null): {
+  label: string;
+  tone: string;
+} {
+  if (!health) {
+    return { label: "Engine offline", tone: "text-white/40" };
+  }
+  if (!health.text_mapper) {
+    return { label: "Not supported by this engine", tone: "text-white/40" };
+  }
+  return MAPPER_COPY[health.text_mapper];
+}
+
+function EngineSection() {
+  const health = useLive((state) => state.health);
+  const mapper = mapperSummary(health);
+  return (
+    <div className="border-white/[0.07] border-b p-3">
+      <p className="font-medium text-sm">Engine</p>
+      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
+        <dt className="text-white/45">GPU</dt>
+        <dd className="truncate text-right text-white/80">
+          {health?.gpu ?? "Not connected"}
+        </dd>
+        <dt className="text-white/45">Text mapper</dt>
+        <dd className={`text-right ${mapper.tone}`}>
+          <Hint
+            label={
+              health?.text_mapper_detail ??
+              "Refines text prompts toward the sounds the model learned from, as Google's apps do."
+            }
+          >
+            <span>{mapper.label}</span>
+          </Hint>
+        </dd>
+      </dl>
+      {health?.text_mapper === "unavailable" ? (
+        <p className="mt-2 text-[11px] text-white/45 leading-relaxed">
+          Text prompts still work, but they will not sound quite like
+          Google&apos;s apps. Connect to the internet once and reload the model
+          to fetch it.
+        </p>
+      ) : null}
+    </div>
+  );
+}
 
 export function SettingsButton() {
   const bufferSeconds = useStudio((state) => state.bufferSeconds);
@@ -43,6 +98,7 @@ export function SettingsButton() {
         className="w-80 border-white/10 bg-[#16151a] p-0 text-white"
         sideOffset={8}
       >
+        <EngineSection />
         <div className="border-white/[0.07] border-b p-3">
           <p className="font-medium text-sm">Playback cushion</p>
           <p className="mt-1 text-white/50 text-xs leading-relaxed">
