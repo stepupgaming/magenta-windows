@@ -62,6 +62,8 @@ The window still starts `engine\server.py` with no flags. That process listens o
 
 To check a GPU, close the window and double-click `gpu-check.bat`. It times `magenta generate` on 20 s of techno, continues that file, then streams from the engine for 10 minutes while it moves three style faders four times a second, changes choices and seed, plays chords, saves and recalls a groove, continues from the stream, and restarts once. Every 10 seconds it reads the engine's own GPU memory from `/health` (`cuda_memory`, so other programs on the GPU don't count) and the whole GPU's from nvidia-smi. It writes `engine\logs\gpu-check\<time>\report.txt`, `3-timeline.txt` with every action and engine event, and the wavs it made. If other programs already hold more than 3 GB of the GPU, it names the CUDA ones and asks before it starts. `gpu-check.bat --minutes 3` shortens the live part.
 
+To hear whether the engine changes since v0.1.1 changed the sound, double-click `ab-check.bat`. It checks v0.1.1 out into a temporary git worktree and renders 20 s of techno on seeds 7, 11 and 23 three ways: `old` (the v0.1.1 engine), `as-old` (today's engine with the text mapper off and all 12 style tokens, as v0.1.1 handled prompts) and `new` (today's engine as it ships). `engine\logs\ab-check\<time>\report.txt` compares each file's level and octave balance, and the wavs sort side by side. `--prompt`, `--drums` and `--seeds` change what it renders.
+
 ## The stage
 
 The window has five areas. Every control can also be reached from the command palette (Ctrl K), and `?` lists the shortcuts.
