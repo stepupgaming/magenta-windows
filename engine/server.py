@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import queue
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +31,7 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 import numpy as np
 import torch
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from transformers import AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
@@ -42,10 +44,65 @@ SAMPLE_RATE = 48_000
 FRAMES_PER_SECOND = 25
 SAMPLES_PER_FRAME = SAMPLE_RATE // FRAMES_PER_SECOND
 PORT = int(os.environ.get("MAGENTA_PORT", "8765"))
+STYLE_TOKENS = 12
+AUDIO_PROMPT_RATE = 16_000
+AUDIO_PROMPT_MIN_SECONDS = 0.5
+AUDIO_PROMPT_MAX_SECONDS = 60.0
+AUDIO_PROMPT_KEEP = 24
+DRUM_MODES = {"auto": None, "on": [1], "off": [0]}
 
 _model: Any = None
 _model_error: str | None = None
 _model_lock = threading.Lock()
+
+# Audio prompts arrive over HTTP as 16 kHz mono float32. They are embedded
+# later on the GPU lane, the same thread that replays the CUDA graph.
+_audio_clips: OrderedDict[str, np.ndarray] = OrderedDict()
+_audio_lock = threading.Lock()
+
+
+def store_audio_clip(raw: bytes) -> tuple[str, float]:
+    if len(raw) % 4 != 0:
+        raise ValueError("audio prompt must be little-endian float32 samples")
+    samples = np.frombuffer(raw, dtype="<f4").astype(np.float32)
+    seconds = samples.shape[0] / AUDIO_PROMPT_RATE
+    if seconds < AUDIO_PROMPT_MIN_SECONDS:
+        raise ValueError("audio prompt is shorter than half a second")
+    if seconds > AUDIO_PROMPT_MAX_SECONDS:
+        raise ValueError("audio prompt is longer than 60 seconds")
+    if not np.all(np.isfinite(samples)):
+        raise ValueError("audio prompt has samples that are not finite")
+    clip_id = hashlib.sha1(raw).hexdigest()[:16]
+    with _audio_lock:
+        _audio_clips[clip_id] = samples
+        _audio_clips.move_to_end(clip_id)
+        while len(_audio_clips) > AUDIO_PROMPT_KEEP:
+            _audio_clips.popitem(last=False)
+    return clip_id, seconds
+
+
+def audio_clip(clip_id: str) -> np.ndarray | None:
+    with _audio_lock:
+        return _audio_clips.get(clip_id)
+
+
+_audio_tower_fetched = False
+
+
+def prefetch_audio_tower() -> None:
+    """Download the audio tower files off the GPU lane, so the first audio
+    prompt does not stall a live stream while it downloads."""
+    global _audio_tower_fetched
+    if _audio_tower_fetched or os.environ.get("HF_HUB_OFFLINE") == "1":
+        return
+    try:
+        from huggingface_hub import hf_hub_download
+
+        for name in ("music_encoder.pt", "mel_params.npz"):
+            hf_hub_download(MUSICCOCA_REPO, name)
+        _audio_tower_fetched = True
+    except Exception as exc:
+        print(f"[magenta] audio tower prefetch failed: {exc}", flush=True)
 
 
 def hub_snapshot(repo_id: str) -> Path:
@@ -138,9 +195,10 @@ def quantize(model: Any, embedding: torch.Tensor) -> list[int]:
 
 
 def clean_notes(raw: Any) -> list[int] | None:
+    """128 pitch slots: -1 masked, 0 off, 1 sustain, 2 onset, 3 on (model picks)."""
     if not isinstance(raw, list) or len(raw) == 0:
         return None
-    notes = [int(value) for value in raw[:128]]
+    notes = [int(np.clip(int(value), -1, 3)) for value in raw[:128]]
     if len(notes) < 128:
         notes.extend([-1] * (128 - len(notes)))
     if all(note < 0 for note in notes):
@@ -148,20 +206,39 @@ def clean_notes(raw: Any) -> list[int] | None:
     return notes
 
 
-def clean_prompts(raw: Any) -> list[dict[str, Any]]:
+def clean_drums(raw: Any) -> str:
+    """auto masks the drum slot, on asks for drums, off asks for none.
+
+    A bool is the older form: true meant the model picks, false meant none.
+    """
+    if isinstance(raw, str) and raw in DRUM_MODES:
+        return raw
+    return "auto" if bool(raw) else "off"
+
+
+def clean_prompts(raw: Any, allow_empty: bool = False) -> list[dict[str, Any]]:
     prompts: list[dict[str, Any]] = []
     if isinstance(raw, list):
         for item in raw:
             if not isinstance(item, dict):
                 continue
-            text = str(item.get("text", "")).strip()
-            if not text:
-                continue
             weight = float(item.get("weight", 1.0))
             if not np.isfinite(weight) or weight < 0:
                 weight = 0.0
+            clip_id = item.get("audio")
+            if isinstance(clip_id, str) and clip_id:
+                if audio_clip(clip_id) is None:
+                    continue
+                prompts.append({"audio": clip_id, "text": f"audio:{clip_id}", "weight": weight})
+                continue
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
             prompts.append({"text": text[:180], "weight": weight})
+    prompts = [item for item in prompts if not allow_empty or item["weight"] > 0]
     if not prompts:
+        if allow_empty:
+            return []
         prompts = [{"text": "warm analog pads", "weight": 1.0}]
     if sum(item["weight"] for item in prompts) <= 0:
         prompts[0]["weight"] = 1.0
@@ -172,15 +249,17 @@ def clean_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
     raw = raw or {}
     temperature = float(raw.get("temperature", 1.05))
     top_k = int(raw.get("top_k", 48))
+    free_style = bool(raw.get("free_style", False))
     return {
-        "prompts": clean_prompts(raw.get("prompts")),
+        "prompts": clean_prompts(raw.get("prompts"), allow_empty=free_style),
         "temperature": float(np.clip(temperature, 0.2, 2.0)),
         "top_k": int(np.clip(top_k, 1, 256)),
-        "cfg_musiccoca": float(np.clip(float(raw.get("cfg_musiccoca", 2.4)), 0.0, 6.0)),
-        "cfg_notes": float(np.clip(float(raw.get("cfg_notes", 0.8)), 0.0, 6.0)),
+        "cfg_musiccoca": float(np.clip(float(raw.get("cfg_musiccoca", 2.4)), 0.0, 7.0)),
+        "cfg_notes": float(np.clip(float(raw.get("cfg_notes", 0.8)), 0.0, 7.0)),
         "cfg_drums": float(np.clip(float(raw.get("cfg_drums", 0.0)), 0.0, 4.0)),
         "notes": clean_notes(raw.get("notes")),
-        "drums": bool(raw.get("drums", False)),
+        "onsets": bool(raw.get("onsets", False)),
+        "drums": clean_drums(raw.get("drums", False)),
         "seed": int(raw.get("seed", 0)),
     }
 
@@ -190,11 +269,49 @@ def _spec_key(spec: dict[str, Any]) -> tuple[Any, ...]:
     return (
         tuple((item["text"], round(float(item["weight"]), 4)) for item in spec["prompts"]),
         None if notes is None else tuple(int(note) for note in notes),
-        bool(spec["drums"]),
+        spec["drums"],
         round(float(spec["cfg_musiccoca"]), 3),
         round(float(spec["cfg_notes"]), 3),
         round(float(spec["cfg_drums"]), 3),
     )
+
+
+def held_pitches(notes: list[int] | None) -> frozenset[int]:
+    if notes is None:
+        return frozenset()
+    return frozenset(index for index, value in enumerate(notes) if value in (1, 2))
+
+
+def with_onsets(notes: list[int], onsets: frozenset[int]) -> list[int]:
+    """Mark fresh pitches as onsets (2) and every other held pitch as sustain (1)."""
+    marked = list(notes)
+    for index, value in enumerate(marked):
+        if value == 2:
+            marked[index] = 1
+    for index in onsets:
+        marked[index] = 2
+    return marked
+
+
+def ensure_audio_tower(model: Any) -> None:
+    """Load the MusicCoCa audio tower, fetching it from the hub when the local
+    snapshot only carries the text encoder."""
+    musiccoca = model.processor._mc
+    if musiccoca._me is not None:
+        return
+    try:
+        musiccoca._ensure_audio()
+        return
+    except Exception as exc:
+        if os.environ.get("HF_HUB_OFFLINE") == "1":
+            raise RuntimeError(
+                f"Audio prompts need music_encoder.pt and mel_params.npz from {MUSICCOCA_REPO}. "
+                "Unset HF_HUB_OFFLINE once so they can download."
+            ) from exc
+    print(f"[magenta] downloading the audio tower from {MUSICCOCA_REPO}", flush=True)
+    musiccoca._resource_dir = None
+    musiccoca._repo_id = MUSICCOCA_REPO
+    musiccoca._ensure_audio()
 
 
 class Session:
@@ -205,22 +322,36 @@ class Session:
         self.decode_state: dict[str, Any] | None = None
         self.signature: tuple[Any, ...] | None = None
         self._spec_key: tuple[Any, ...] | None = None
+        self._held: frozenset[int] = frozenset()
+        self._sustain_source: torch.Tensor | None = None
         self.top_k = 48
 
-    def _embed(self, text: str) -> torch.Tensor:
-        cached = self.cache.get(text)
+    def _embed(self, item: dict[str, Any]) -> torch.Tensor:
+        key = item["text"]
+        cached = self.cache.get(key)
         if cached is not None:
             return cached
-        embedding = _as_embedding(self.model.processor.embed(text), self.model._dev)
-        self.cache[text] = embedding
+        clip_id = item.get("audio")
+        if clip_id:
+            samples = audio_clip(clip_id)
+            if samples is None:
+                raise RuntimeError("An audio prompt expired on the engine. Add it again.")
+            ensure_audio_tower(self.model)
+            raw = self.model.processor.embed((samples, AUDIO_PROMPT_RATE))
+        else:
+            raw = self.model.processor.embed(key)
+        embedding = _as_embedding(raw, self.model._dev)
+        self.cache[key] = embedding
         return embedding
 
-    def _source(self, spec: dict[str, Any]) -> tuple[list[int], list[int] | None, list[int] | None, torch.Tensor]:
-        embeddings = [self._embed(item["text"]) for item in spec["prompts"]]
+    def _style_tokens(self, spec: dict[str, Any]) -> list[int]:
+        if not spec["prompts"]:
+            return [-1] * STYLE_TOKENS
+        embeddings = [self._embed(item) for item in spec["prompts"]]
         weights = [float(item["weight"]) for item in spec["prompts"]]
-        tokens = quantize(self.model, blend_embeddings(embeddings, weights))
-        notes = spec["notes"]
-        drums = None if spec["drums"] else [0]
+        return quantize(self.model, blend_embeddings(embeddings, weights))
+
+    def _encode(self, tokens: list[int], notes: list[int] | None, drums: list[int] | None, spec: dict[str, Any]) -> torch.Tensor:
         cond = self.model._resolve_conditioning(
             tokens,
             notes,
@@ -229,8 +360,13 @@ class Session:
             spec["cfg_notes"],
             spec["cfg_drums"],
         )
-        source = self.model.depthformer.encode(cond).to(self.model._dt)
-        return tokens, notes, drums, source
+        return self.model.depthformer.encode(cond).to(self.model._dt)
+
+    def _source(self, spec: dict[str, Any]) -> tuple[list[int], list[int] | None, list[int] | None, torch.Tensor]:
+        tokens = self._style_tokens(spec)
+        notes = spec["notes"]
+        drums = DRUM_MODES[spec["drums"]]
+        return tokens, notes, drums, self._encode(tokens, notes, drums, spec)
 
     def start(self, spec: dict[str, Any]) -> None:
         tokens, notes, drums, source = self._source(spec)
@@ -248,6 +384,10 @@ class Session:
             guidance=False,
         )
         self.decode_state = self.model.init_decode_state()
+        self._held = held_pitches(notes) if spec["onsets"] else frozenset()
+        if self._held and notes is not None:
+            self._sustain_source = source
+            source = self._encode(tokens, with_onsets(notes, self._held), drums, spec)
         self.streamer.set_source(source)
         self.streamer.set_temperature(spec["temperature"])
         self.signature = (
@@ -260,23 +400,40 @@ class Session:
         )
         self._spec_key = _spec_key(spec)
 
-    def _apply(self, spec: dict[str, Any]) -> None:
+    def _apply(self, spec: dict[str, Any], flush: bool = False) -> None:
         if self.streamer is None:
             raise RuntimeError("session is not started")
         key = _spec_key(spec)
         if key != self._spec_key:
-            _tokens, _notes, _drums, source = self._source(spec)
-            self.streamer.set_source(source)
+            tokens, notes, drums, source = self._source(spec)
+            held = held_pitches(notes) if spec["onsets"] else frozenset()
+            onsets = held - self._held
+            self._held = held
+            if onsets and notes is not None:
+                # The first frame hears the fresh pitches as onsets. The
+                # sustain source takes over after that frame.
+                self._sustain_source = source
+                source = self._encode(tokens, with_onsets(notes, onsets), drums, spec)
+            else:
+                self._sustain_source = None
+            self.streamer.set_source(source, flush=flush)
             self._spec_key = key
             self.signature = key
         self.streamer.set_temperature(spec["temperature"])
 
-    def step(self, spec: dict[str, Any], frames: int = 2) -> tuple[np.ndarray, float]:
+    def _frame(self) -> torch.Tensor:
+        piece = self.streamer.step()
+        if self._sustain_source is not None:
+            self.streamer.set_source(self._sustain_source)
+            self._sustain_source = None
+        return piece
+
+    def step(self, spec: dict[str, Any], frames: int = 2, flush: bool = False) -> tuple[np.ndarray, float]:
         if self.streamer is None or self.decode_state is None:
             raise RuntimeError("session is not started")
-        self._apply(spec)
+        self._apply(spec, flush)
         started = time.perf_counter()
-        pieces = [self.streamer.step() for _ in range(frames)]
+        pieces = [self._frame() for _ in range(frames)]
         torch.cuda.synchronize()
         elapsed_ms = (time.perf_counter() - started) * 1000.0 / frames
         audio = self.model.decode_stream(torch.cat(pieces, dim=1), self.decode_state)
@@ -365,13 +522,43 @@ def post_shutdown() -> dict[str, bool]:
     return {"ok": True, "stopping": True}
 
 
+@app.post("/audio-prompt")
+async def post_audio_prompt(request: Request) -> dict[str, Any]:
+    """Store a 16 kHz mono float32 clip. Prompts then name it by id."""
+    raw = await request.body()
+    try:
+        clip_id, seconds = store_audio_clip(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await asyncio.to_thread(prefetch_audio_tower)
+    return {"id": clip_id, "seconds": round(seconds, 3)}
+
+
 def apply_client_message(payload: dict[str, Any], spec: dict[str, Any]) -> tuple[dict[str, Any], str]:
     op = str(payload.get("op") or "")
     if op == "stop":
         return spec, "stop"
-    if op in {"start", "steer"}:
+    if op in {"start", "steer", "restart"}:
         return clean_spec(payload), op
     return spec, "ignore"
+
+
+async def start_session(websocket: WebSocket, lane: GpuLane, spec: dict[str, Any]) -> Session:
+    await websocket.send_json({"type": "status", "message": "Loading model"})
+    model = await asyncio.to_thread(lane.call, load_model)
+    await websocket.send_json({"type": "status", "message": "Capturing CUDA graph"})
+    session = Session(model)
+    await asyncio.to_thread(lane.call, session.start, spec)
+    await websocket.send_json(
+        {
+            "type": "started",
+            "sampleRate": SAMPLE_RATE,
+            "channels": 2,
+            "topK": session.top_k,
+            "seed": int(spec["seed"]),
+        }
+    )
+    return session
 
 
 @app.websocket("/ws/stream")
@@ -422,26 +609,16 @@ async def stream_ws(websocket: WebSocket) -> None:
             if op == "stop":
                 await websocket.send_json({"type": "stopped"})
                 return
-            if op != "start":
+            if op not in {"start", "restart"}:
                 continue
-            await websocket.send_json({"type": "status", "message": "Loading model"})
-            model = await asyncio.to_thread(lane.call, load_model)
-            await websocket.send_json({"type": "status", "message": "Capturing CUDA graph"})
-            session = Session(model)
-            await asyncio.to_thread(lane.call, session.start, spec)
-            await websocket.send_json(
-                {
-                    "type": "started",
-                    "sampleRate": SAMPLE_RATE,
-                    "channels": 2,
-                    "topK": session.top_k,
-                }
-            )
+            session = await start_session(websocket, lane, spec)
 
         sent = 0
         wall = time.perf_counter()
         last_stats = 0.0
         while True:
+            restart = False
+            flush = False
             while True:
                 try:
                     payload = await take_message(0)
@@ -453,8 +630,17 @@ async def stream_ws(websocket: WebSocket) -> None:
                 if op == "stop":
                     await websocket.send_json({"type": "stopped"})
                     return
+                restart = restart or op == "restart"
+                flush = flush or bool(payload.get("cut", False))
+            if restart:
+                # A fresh session clears the model's memory and applies the
+                # new seed and top_k, which the captured graph fixes.
+                await asyncio.to_thread(lane.call, session.close)
+                session = await start_session(websocket, lane, spec)
+                sent = 0
+                wall = time.perf_counter()
             current = spec
-            samples, frame_ms = await asyncio.to_thread(lane.call, session.step, current, 4)
+            samples, frame_ms = await asyncio.to_thread(lane.call, session.step, current, 4, flush)
             if samples.size:
                 await websocket.send_bytes(pcm_bytes(samples))
                 sent += int(samples.shape[0])
