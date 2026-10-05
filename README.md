@@ -79,7 +79,12 @@ pnpm mock
 pnpm --filter native dev
 ```
 
-`pnpm test` runs the unit tests for the stage logic.
+`pnpm test` runs the unit tests for the stage logic. The engine has its own tests, which also need no GPU:
+
+```powershell
+cd engine
+uv run --with pytest --with flatbuffers pytest tests
+```
 
 ## Weights
 
@@ -96,6 +101,8 @@ If the release does not exist yet, `magenta load` and `magenta generate` downloa
 
 - `magenta-community/magenta-realtime-2`
 - `magenta-torch/magenta-rt-musiccoca-torch`
+
+Text prompts also go through the MusicCoCa text mapper, as they do in Google's apps. It is about 86 MB, comes from `magenta-rt-public` on Google Cloud Storage, and lands in the same cache under `models--google--magenta-realtime-2`. The first load downloads it when it is missing, and new releases include it. Without it the model still plays, but text prompts land on different style tokens than upstream. Set `MAGENTA_TEXT_MAPPER=off` to skip it.
 
 Pack or check the splitter without touching the GPU:
 
@@ -120,4 +127,4 @@ Publish a release by pushing a `v0.0.0` tag, or by running the `Release Windows`
 
 ## License
 
-The app shell is MIT (`LICENSE`, Copyright (c) 2026 Dest). `engine/model_code` is Apache-2.0. The weight files stay under their Hugging Face licenses and are downloaded, not vendored into git.
+The app shell is MIT (`LICENSE`, Copyright (c) 2026 Dest). `engine/model_code` is Apache-2.0. The weight files stay under their Hugging Face licenses and are downloaded, not vendored into git. `engine/magenta_win/text_mapper.py` reimplements the architecture of Google's MusicCoCa text mapper. Its weights, `mapper.tflite` from Magenta RealTime 2, are by Google and licensed CC BY 4.0.
