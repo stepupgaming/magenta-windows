@@ -48,6 +48,11 @@
           "type": "toml",
           "path": "apps/native/src-tauri/Cargo.toml",
           "jsonpath": "$.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "apps/native/src-tauri/Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==='magenta_2_windows')].version"
         }
       ]
     }
