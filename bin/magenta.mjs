@@ -38,16 +38,20 @@ if (!existsSync(python)) {
     fail(
       synced.error
         ? `uv sync failed: ${synced.error.message}`
-        : "uv sync did not create engine/.venv. Install uv, then run this again.",
+        : "uv sync did not create engine/.venv. Install uv, then run this again."
     );
   }
 }
 
 const needsWeights = args.includes("generate") || args.includes("load");
 if (needsWeights) {
-  const status = run(python, [path.join(root, "scripts", "release_weights.py"), "ensure"], {
-    env: { ...process.env, PYTHONPATH: engine },
-  });
+  const status = run(
+    python,
+    [path.join(root, "scripts", "release_weights.py"), "ensure"],
+    {
+      env: { ...process.env, PYTHONPATH: engine },
+    }
+  );
   if (status !== 0) {
     process.exit(status);
   }
@@ -57,5 +61,5 @@ process.exit(
   run(python, ["-m", "magenta_win.cli", ...args], {
     cwd: engine,
     env: { ...process.env, PYTHONPATH: engine },
-  }),
+  })
 );
