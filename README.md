@@ -54,7 +54,7 @@ bun run dev
 pnpm dev
 ```
 
-`bun run dev` and `pnpm dev` both run `bin/dev.mjs`, which runs `pnpm --filter native tauri dev`. That opens the desktop window at http://localhost:3000. `pnpm web dev` is the browser shell on port 3001.
+`bun run dev` and `pnpm dev` both run `bin/dev.mjs`, which runs `pnpm --filter native tauri dev`. That opens the desktop window at http://localhost:3000. When something else holds port 3000, it uses the next free port and says so; 3001 stays free for the web app. `pnpm web dev` is the browser shell on port 3001.
 
 `generate` defaults: temperature 1.05, top-k 48, style 2.4, style detail 6, note strength 0.8, drums off, seed 7, wav path `magenta.wav`. `--seconds` is required and the maximum is 120. Repeat `--prompt` up to 8 times. A weight is `TEXT:WEIGHT`. `--continue song.wav` makes the model carry on from the end of any audio file instead of starting fresh, and the wav starts with `--lead-in` seconds of the file (4 by default) so you hear the join. The full menu is `magenta generate --help`.
 

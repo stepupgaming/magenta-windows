@@ -20,7 +20,7 @@ pnpm install
 pnpm dev
 
 # Individual targets
-pnpm web dev               # Web only (http://localhost:3001). Desktop dev is native on port 3000.
+pnpm web dev               # Web only (http://localhost:3001). Desktop dev is native on port 3000, or the next free port (bin/dev.mjs).
 pnpm tauri dev             # Desktop only
 pnpm tauri android dev     # Android
 pnpm tauri ios dev         # iOS
