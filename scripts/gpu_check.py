@@ -73,9 +73,9 @@ def clock(seconds: float) -> str:
     return f"{int(seconds // 60)}:{int(seconds % 60):02d}"
 
 
-def child_env() -> dict[str, str]:
+def child_env(engine: Path | None = None) -> dict[str, str]:
     env = dict(os.environ)
-    env["PYTHONPATH"] = str(ENGINE)
+    env["PYTHONPATH"] = str(engine or ENGINE)
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     return env
@@ -182,7 +182,14 @@ class Render:
         return any(marker in line for line in self.tail for marker in OUT_OF_MEMORY)
 
 
-def run_generate(label: str, command: list[str], log_path: Path) -> Render:
+def run_generate(
+    label: str,
+    command: list[str],
+    log_path: Path,
+    engine: Path | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> Render:
+    """Run magenta generate from `engine` (this checkout's by default) and parse its output."""
     started = time.perf_counter()
     frames: list[float] = []
     speed: float | None = None
@@ -191,8 +198,8 @@ def run_generate(label: str, command: list[str], log_path: Path) -> Render:
         log_path.open("w", encoding="utf-8") as log,
         subprocess.Popen(
             command,
-            cwd=ENGINE,
-            env=child_env(),
+            cwd=engine or ENGINE,
+            env={**child_env(engine), **(extra_env or {})},
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
