@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from magenta_win import google_files
 from magenta_win import text_mapper_file as files
 
 PAYLOAD = b"mapper-bytes" * 1000
@@ -28,7 +29,7 @@ def serve(monkeypatch: pytest.MonkeyPatch, body: bytes) -> list[str]:
         requested.append(url)
         return io.BytesIO(body)
 
-    monkeypatch.setattr(files.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(google_files.urllib.request, "urlopen", fake_urlopen)
     return requested
 
 
@@ -101,7 +102,7 @@ def test_survives_a_dropped_connection(monkeypatch: pytest.MonkeyPatch, tmp_path
         def read(self, size: int | None = -1) -> bytes:
             raise http.client.IncompleteRead(b"partial")
 
-    monkeypatch.setattr(files.urllib.request, "urlopen", lambda url, timeout: Dropped())
+    monkeypatch.setattr(google_files.urllib.request, "urlopen", lambda url, timeout: Dropped())
     found = files.locate_mapper(tmp_path, allow_download=True, log=lambda _: None)
     assert found.state == "unavailable"
     target = files.mapper_target(tmp_path)

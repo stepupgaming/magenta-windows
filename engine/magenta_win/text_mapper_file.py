@@ -18,27 +18,27 @@ path to a mapper.tflite to use.
 
 from __future__ import annotations
 
-import hashlib
 import http.client
 import os
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-MAPPER_REPO = "google/magenta-realtime-2"
+from magenta_win import google_files
+from magenta_win.google_files import GoogleFile
+
+MAPPER_REPO = google_files.GOOGLE_REPO
 MAPPER_FILE = "resources/musiccoca/mapper.tflite"
-MAPPER_URL = "https://storage.googleapis.com/magenta-rt-public/magenta-rt-2/resources/musiccoca/mapper.tflite"
+MAPPER_URL = f"{google_files.BUCKET}/{MAPPER_FILE}"
 MAPPER_SHA256 = "2f9743cc8f121a588b69c7f4d79a2a4111ce81864cbde8830054cd5e97f3d717"
 MAPPER_SIZE = 86_166_664
 # The bucket object's generation. It names the snapshot folder the way a
 # commit hash names one for files that come from Hugging Face.
-MAPPER_SNAPSHOT = "gcs-1780512877384441"
+MAPPER_GENERATION = 1780512877384441
+MAPPER_SNAPSHOT = f"gcs-{MAPPER_GENERATION}"
 MAPPER_ENV = "MAGENTA_TEXT_MAPPER"
 
 _OFF = {"0", "off", "false", "no"}
-_BLOCK = 4 * 1024 * 1024
-_TIMEOUT = 30
 
 
 @dataclass(frozen=True)
@@ -50,67 +50,37 @@ class MapperFile:
     detail: str
 
 
-def _repo_dir(cache: Path) -> Path:
-    return cache / ("models--" + MAPPER_REPO.replace("/", "--"))
+def mapper() -> GoogleFile:
+    """The pinned mapper, read when called so tests can pin other bytes."""
+    return GoogleFile(MAPPER_FILE, MAPPER_SHA256, MAPPER_SIZE, MAPPER_GENERATION)
 
 
 def mapper_target(cache: Path) -> Path:
     """Where a downloaded mapper is stored."""
-    return _repo_dir(cache) / "snapshots" / MAPPER_SNAPSHOT / MAPPER_FILE
+    return google_files.target(cache, mapper())
 
 
 def cached_mappers(cache: Path) -> list[Path]:
     """Every mapper.tflite in the cache, newest snapshot first."""
-    snapshots = _repo_dir(cache) / "snapshots"
-    if not snapshots.is_dir():
-        return []
-    found = [path for path in snapshots.glob(f"*/{MAPPER_FILE}") if path.is_file()]
-    return sorted(found, key=lambda path: path.stat().st_mtime, reverse=True)
+    return google_files.cached(cache, mapper())
 
 
 def sha256_of(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while block := handle.read(_BLOCK):
-            digest.update(block)
-    return digest.hexdigest()
+    return google_files.sha256_of(path)
 
 
 def is_genuine(path: Path) -> bool:
     """True when the file is the mapper the PyTorch port was checked against."""
-    try:
-        return path.stat().st_size == MAPPER_SIZE and sha256_of(path) == MAPPER_SHA256
-    except OSError:
-        return False
+    return google_files.is_genuine(path, mapper())
 
 
 def find_mapper(cache: Path) -> Path | None:
-    for path in cached_mappers(cache):
-        if is_genuine(path):
-            return path
-    return None
+    return google_files.find(cache, mapper())
 
 
 def fetch_mapper(cache: Path, log: Callable[[str], None] = print) -> Path:
     """Download the mapper into the cache and verify it. Returns its path."""
-    target = mapper_target(cache)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    partial = target.with_name(target.name + ".part")
-    digest = hashlib.sha256()
-    size = 0
-    log(f"downloading the text mapper ({MAPPER_SIZE // 1_000_000} MB) from {MAPPER_URL}")
-    try:
-        with urllib.request.urlopen(MAPPER_URL, timeout=_TIMEOUT) as response, partial.open("wb") as handle:
-            while block := response.read(_BLOCK):
-                handle.write(block)
-                digest.update(block)
-                size += len(block)
-        if size != MAPPER_SIZE or digest.hexdigest() != MAPPER_SHA256:
-            raise OSError(f"the downloaded mapper failed its checksum ({size} bytes)")
-        os.replace(partial, target)
-    finally:
-        partial.unlink(missing_ok=True)
-    return target
+    return google_files.fetch(cache, mapper(), log)
 
 
 def locate_mapper(cache: Path, allow_download: bool, log: Callable[[str], None] = print) -> MapperFile:
