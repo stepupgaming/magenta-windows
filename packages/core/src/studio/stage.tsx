@@ -1,523 +1,362 @@
 "use client";
 
-import { invoke, isTauri } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { LiveAudio } from "./audio.ts";
-import { noteFromKey, Piano } from "./piano.tsx";
-import { PromptStack, Slider } from "./prompts.tsx";
+import { Toaster } from "@workspace/ui/components/sonner";
+import { TooltipProvider } from "@workspace/ui/components/tooltip";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { captureLast, toggleRecord } from "./actions.ts";
+import { pruneClips } from "./clips.ts";
 import {
-  CHIP_COLORS,
-  ENGINE,
-  type EngineHealth,
-  type PromptLine,
-} from "./types.ts";
+  freshStart,
+  recallScene,
+  reroll,
+  saveScene,
+  startConductor,
+  tapTempo,
+  togglePlay,
+  toggleProgression,
+} from "./conductor.ts";
+import { engine } from "./engine.ts";
+import { startMidi } from "./midi.ts";
+import { allNotesOff, setHold } from "./notes.ts";
+import { type ActionDef, registerActions } from "./params.ts";
+import { promptShares } from "./spec.ts";
+import { useLive, useStudio } from "./store.ts";
+import { AudioPromptDialog, type AudioSource } from "./ui/audio-dialog.tsx";
+import { EngineBanner } from "./ui/engine-banner.tsx";
+import { FxPanel } from "./ui/fx-panel.tsx";
+import { HelpDialog } from "./ui/help.tsx";
+import { SHORTCUT_LABELS, useStageHotkeys } from "./ui/hotkeys.ts";
+import { LibraryDialog } from "./ui/library.tsx";
+import { ModelPanel } from "./ui/model-panel.tsx";
+import { NotesDock } from "./ui/notes-dock.tsx";
+import { CommandPalette } from "./ui/palette.tsx";
+import { ScenesPanel } from "./ui/scenes-panel.tsx";
+import { StylePanel } from "./ui/style-panel.tsx";
+import { TakesSheet } from "./ui/takes.tsx";
+import { TopBar } from "./ui/top-bar.tsx";
+import { Visualizer } from "./ui/visualizer.tsx";
 
-const START_PROMPTS: PromptLine[] = [
-  { color: "#f5c542", id: "chords", text: "soothing chords", weight: 70 },
-];
-
-type Phase = "error" | "live" | "loading" | "offline" | "ready";
-
-function notesPayload(held: number[], gate: boolean): number[] | null {
-  if (held.length === 0) {
-    return gate ? Array.from({ length: 128 }, () => 0) : null;
-  }
-  const notes = Array.from({ length: 128 }, () => -1);
-  for (const note of held) {
-    if (note >= 0 && note < 128) {
-      notes[note] = 1;
-    }
-  }
-  return notes;
-}
-
-async function bootstrapText(): Promise<string> {
-  if (!isTauri()) {
-    return "";
-  }
-  try {
-    return await invoke<string>("bootstrap_status");
-  } catch {
-    return "";
-  }
-}
-
-async function fetchHealth(): Promise<EngineHealth | null> {
-  const response = await fetch(`${ENGINE}/health`);
-  if (!response.ok) {
-    return null;
-  }
-  return (await response.json()) as EngineHealth;
-}
-
-function applyHealth(
-  body: EngineHealth | null,
-  phase: Phase,
-  setHealth: (value: EngineHealth | null) => void,
-  setPhase: (value: Phase) => void,
-  setStatus: (value: string) => void
-): void {
-  if (!body) {
-    setHealth(null);
-    if (phase !== "live" && phase !== "loading") {
-      setPhase("offline");
-      setStatus("Engine offline");
-    }
-    return;
-  }
-  setHealth(body);
-  if (phase === "offline" || phase === "ready") {
-    setPhase("ready");
-    setStatus(body.gpu ?? "Engine ready");
-  }
-}
-
-interface StreamMessage {
-  message?: string;
-  msPerFrame?: number;
-  type?: string;
-}
-
-function handleStreamText(
-  raw: string,
-  setLatency: (value: number | null) => void,
-  setPhase: (value: Phase) => void,
-  setStatus: (value: string) => void
-): void {
-  const message = JSON.parse(raw) as StreamMessage;
-  if (message.type === "status" && message.message) {
-    setStatus(message.message);
-  }
-  if (message.type === "started") {
-    setPhase("live");
-    setStatus("Live. Sound in about a second.");
-  }
-  if (message.type === "stats" && typeof message.msPerFrame === "number") {
-    setLatency(message.msPerFrame);
-  }
-  if (message.type === "error") {
-    setPhase("error");
-    setStatus(message.message ?? "Stream failed");
-  }
-}
-
-interface PlayColumnProps {
-  drumGuide: number;
-  drums: boolean;
-  gate: boolean;
-  held: number[];
-  instGuide: number;
-  onDown: (note: number) => void;
-  onDrumGuide: (value: number) => void;
-  onDrums: (value: boolean) => void;
-  onGate: (value: boolean) => void;
-  onInstGuide: (value: number) => void;
-  onTemperature: (value: number) => void;
-  onTextGuide: (value: number) => void;
-  onTopK: (value: number) => void;
-  onUp: (note: number) => void;
-  onVolume: (value: number) => void;
-  temperature: number;
-  textGuide: number;
-  topK: number;
-  volume: number;
-}
-
-function PlayColumn({
-  drumGuide,
-  drums,
-  gate,
-  held,
-  instGuide,
-  onDown,
-  onDrumGuide,
-  onDrums,
-  onGate,
-  onInstGuide,
-  onTemperature,
-  onTextGuide,
-  onTopK,
-  onUp,
-  onVolume,
-  temperature,
-  textGuide,
-  topK,
-  volume,
-}: PlayColumnProps) {
-  return (
-    <section className="flex flex-col gap-4 overflow-auto">
-      <div>
-        <h2 className="font-medium text-lg">Notes</h2>
-        <div className="mt-3">
-          <Piano held={held} onDown={onDown} onUp={onUp} />
-        </div>
-        <label className="mt-3 flex items-center gap-2 text-sm">
-          <input
-            checked={gate}
-            className="accent-orange-500"
-            onChange={(event) => onGate(event.target.checked)}
-            type="checkbox"
-          />
-          Wait for a key before playing notes
-        </label>
-      </div>
-      <Slider
-        label="Style strength"
-        max={6}
-        min={0}
-        onChange={onTextGuide}
-        step={0.1}
-        value={textGuide}
-      />
-      <Slider
-        label="Note strength"
-        max={6}
-        min={0}
-        onChange={onInstGuide}
-        step={0.1}
-        value={instGuide}
-      />
-      <Slider
-        label="Temperature"
-        max={2}
-        min={0.2}
-        onChange={onTemperature}
-        step={0.05}
-        value={temperature}
-      />
-      <Slider
-        label="Choices"
-        max={160}
-        min={8}
-        note="Applies the next time you load. A live change waits for that."
-        onChange={onTopK}
-        step={1}
-        value={topK}
-      />
-      <label className="flex items-center gap-2 text-sm">
-        <input
-          checked={drums}
-          className="accent-orange-500"
-          onChange={(event) => onDrums(event.target.checked)}
-          type="checkbox"
-        />
-        Drums
-      </label>
-      <Slider
-        label="Drum strength"
-        max={4}
-        min={0}
-        onChange={onDrumGuide}
-        step={0.1}
-        value={drumGuide}
-      />
-      <Slider
-        label="Volume"
-        max={1.4}
-        min={0}
-        onChange={onVolume}
-        step={0.05}
-        value={volume}
-      />
-    </section>
+/** Soft light behind the stage, tinted by whatever the blend is right now. */
+function Ambience() {
+  const prompts = useStudio((state) => state.prompts);
+  const mixMode = useStudio((state) => state.mixMode);
+  const listener = useStudio((state) => state.listener);
+  const phase = useLive((state) => state.phase);
+  const shares = useMemo(
+    () => promptShares(prompts, mixMode, listener),
+    [prompts, mixMode, listener]
   );
+  const ranked = prompts
+    .map((prompt, index) => ({
+      color: prompt.color,
+      share: shares[index] ?? 0,
+    }))
+    .filter((item) => item.share > 0)
+    .sort((a, b) => b.share - a.share)
+    .slice(0, 3);
+  const spots = ["18% 22%", "82% 30%", "50% 92%"];
+  const strength = phase === "live" ? 1 : 0.55;
+  const background = ranked
+    .map(
+      (item, index) =>
+        `radial-gradient(60% 55% at ${spots[index]}, ${item.color}${Math.round(
+          (0.08 + item.share * 0.16) * strength * 255
+        )
+          .toString(16)
+          .padStart(2, "0")}, transparent 70%)`
+    )
+    .join(", ");
+  return (
+    <div
+      aria-hidden="true"
+      className="pointer-events-none absolute inset-0 transition-[background] duration-1000"
+      style={{ background: background || undefined }}
+    />
+  );
+}
+
+function useRehydrated(): boolean {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const finish = () => setReady(true);
+    const off = useStudio.persist.onFinishHydration(finish);
+    if (useStudio.persist.hasHydrated()) {
+      finish();
+    } else {
+      Promise.resolve(useStudio.persist.rehydrate()).catch(finish);
+    }
+    return off;
+  }, []);
+  return ready;
 }
 
 export function Stage() {
-  const [health, setHealth] = useState<EngineHealth | null>(null);
-  const [phase, setPhase] = useState<Phase>("offline");
-  const [status, setStatus] = useState("Engine offline");
-  const [prompts, setPrompts] = useState<PromptLine[]>(START_PROMPTS);
-  const [draft, setDraft] = useState("");
-  const [temperature, setTemperature] = useState(1.05);
-  const [topK, setTopK] = useState(48);
-  const [textGuide, setTextGuide] = useState(2.4);
-  const [instGuide, setInstGuide] = useState(0.8);
-  const [drumGuide, setDrumGuide] = useState(1);
-  const [drums, setDrums] = useState(false);
-  const [volume, setVolume] = useState(0.8);
-  const [gate, setGate] = useState(false);
-  const [held, setHeld] = useState<number[]>([]);
-  const [latency, setLatency] = useState<number | null>(null);
-  const audioRef = useRef<LiveAudio | null>(null);
-  const socketRef = useRef<WebSocket | null>(null);
-  const heldRef = useRef<number[]>([]);
-  const phaseRef = useRef<Phase>("offline");
-  phaseRef.current = phase;
+  const ready = useRehydrated();
+  const [palette, setPalette] = useState(false);
+  const [help, setHelp] = useState(false);
+  const [takes, setTakes] = useState(false);
+  const [library, setLibrary] = useState(false);
+  const [audioSource, setAudioSource] = useState<AudioSource | null>(null);
+  const promptInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    heldRef.current = held;
-  }, [held]);
-
-  useEffect(() => {
-    let stop = false;
-    const tick = async () => {
-      let body: EngineHealth | null = null;
-      try {
-        body = await fetchHealth();
-      } catch {
-        body = null;
-      }
-      if (!stop && !body) {
-        const text = await bootstrapText();
-        if (!stop && text) {
-          setHealth(null);
-          if (phaseRef.current !== "live" && phaseRef.current !== "loading") {
-            setPhase("offline");
-            setStatus(text);
-          }
-          return;
-        }
-      }
-      if (!stop) {
-        applyHealth(body, phaseRef.current, setHealth, setPhase, setStatus);
-      }
-    };
-    const timer = window.setInterval(() => {
-      tick().catch(() => undefined);
-    }, 2000);
-    tick().catch(() => undefined);
+    const root = document.documentElement;
+    const wasDark = root.classList.contains("dark");
+    root.classList.add("dark");
     return () => {
-      stop = true;
-      window.clearInterval(timer);
+      if (!wasDark) {
+        root.classList.remove("dark");
+      }
     };
   }, []);
 
-  const spec = useCallback(
-    () => ({
-      cfg_drums: drums ? drumGuide : 0,
-      cfg_musiccoca: textGuide,
-      cfg_notes: instGuide,
-      drums,
-      notes: notesPayload(heldRef.current, gate),
-      op: "steer",
-      prompts: prompts
-        .filter((prompt) => prompt.text.trim().length > 0)
-        .map((prompt) => ({
-          text: prompt.text.trim(),
-          weight: prompt.weight,
-        })),
-      seed: 7,
-      temperature,
-      top_k: Math.round(topK),
-    }),
-    [prompts, temperature, topK, textGuide, instGuide, drumGuide, drums, gate]
-  );
-
   useEffect(() => {
-    const socket = socketRef.current;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(spec()));
-    }
-  }, [spec]);
-
-  useEffect(() => {
-    audioRef.current?.setVolume(volume);
-  }, [volume]);
-
-  const stopStream = useCallback(() => {
-    const socket = socketRef.current;
-    socketRef.current = null;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ op: "stop" }));
-      socket.close();
-    }
-    audioRef.current?.close();
-    audioRef.current = null;
-    setPhase("ready");
-    setStatus(health?.gpu ?? "Stopped");
-  }, [health]);
-
-  const startStream = useCallback(async () => {
-    const audio = new LiveAudio();
-    audioRef.current = audio;
-    await audio.resume();
-    audio.setVolume(volume);
-    const socket = new WebSocket("ws://127.0.0.1:8765/ws/stream");
-    socket.binaryType = "arraybuffer";
-    socketRef.current = socket;
-    socket.onmessage = (event) => {
-      if (typeof event.data === "string") {
-        handleStreamText(event.data, setLatency, setPhase, setStatus);
-        return;
-      }
-      if (event.data instanceof ArrayBuffer) {
-        audio.pushPcm16(event.data);
-      }
-    };
-    socket.onopen = () => {
-      socket.send(JSON.stringify({ ...spec(), op: "start" }));
-    };
-    socket.onerror = () => {
-      setPhase("error");
-      setStatus("Socket failed");
-    };
-    socket.onclose = () => {
-      if (socketRef.current === socket) {
-        setPhase("ready");
-      }
-    };
-  }, [spec, volume]);
-
-  const loadAndPlay = useCallback(async () => {
-    setPhase("loading");
-    setStatus("Loading the model onto the GPU");
-    try {
-      const response = await fetch(`${ENGINE}/load`, { method: "POST" });
-      if (!response.ok) {
-        throw new Error(`load failed (${response.status})`);
-      }
-      const body = (await response.json()) as EngineHealth;
-      setHealth(body);
-      await startStream();
-    } catch (error) {
-      setPhase("error");
-      setStatus(error instanceof Error ? error.message : "Load failed");
-    }
-  }, [startStream]);
-
-  useEffect(() => {
-    const down = (event: KeyboardEvent) => {
-      if (
-        event.repeat ||
-        event.target instanceof HTMLInputElement ||
-        event.target instanceof HTMLTextAreaElement
-      ) {
-        return;
-      }
-      const note = noteFromKey(event.key);
-      if (note === null || heldRef.current.includes(note)) {
-        return;
-      }
-      setHeld([...heldRef.current, note]);
-    };
-    const up = (event: KeyboardEvent) => {
-      const note = noteFromKey(event.key);
-      if (note === null) {
-        return;
-      }
-      setHeld(heldRef.current.filter((item) => item !== note));
-    };
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-    return () => {
-      window.removeEventListener("keydown", down);
-      window.removeEventListener("keyup", up);
-    };
-  }, []);
-
-  useEffect(
-    () => () => {
-      socketRef.current?.close();
-      audioRef.current?.close();
-    },
-    []
-  );
-
-  const addPrompt = () => {
-    const text = draft.trim();
-    if (!text || prompts.length >= 8) {
+    if (!ready) {
       return;
     }
-    const color = CHIP_COLORS[prompts.length % CHIP_COLORS.length] ?? "#ffffff";
-    setPrompts((current) => [
-      ...current,
-      { color, id: `${Date.now()}`, text, weight: 50 },
-    ]);
-    setDraft("");
-  };
+    const stopWatching = engine.watch();
+    const stopConductor = startConductor();
+    startMidi().catch(() => undefined);
+    const studio = useStudio.getState();
+    const keep = new Set<string>();
+    for (const prompt of [
+      ...studio.prompts,
+      ...studio.scenes.flatMap((scene) => scene?.prompts ?? []),
+    ]) {
+      if (prompt.clipKey) {
+        keep.add(prompt.clipKey);
+      }
+    }
+    pruneClips(keep).catch(() => undefined);
+    return () => {
+      stopWatching();
+      stopConductor();
+    };
+  }, [ready]);
 
-  const holdNote = (note: number) => {
-    setHeld((current) =>
-      current.includes(note) ? current : [...current, note]
-    );
-  };
-  const releaseNote = (note: number) => {
-    setHeld((current) => current.filter((item) => item !== note));
-  };
+  const openPalette = useCallback(() => setPalette(true), []);
+  const openHelp = useCallback(() => setHelp(true), []);
+  useStageHotkeys(openPalette, openHelp);
 
-  const loadDisabled = phase === "loading" || phase === "offline";
+  useEffect(() => {
+    const list: ActionDef[] = [
+      {
+        group: "Transport",
+        id: "transport.play",
+        label: "Play or stop",
+        run: togglePlay,
+      },
+      {
+        group: "Transport",
+        id: "model.reroll",
+        label: "Re-roll the seed",
+        run: reroll,
+      },
+      {
+        group: "Transport",
+        id: "model.fresh",
+        label: "Fresh start",
+        run: freshStart,
+      },
+      {
+        group: "Transport",
+        id: "tempo.tap",
+        label: "Tap tempo",
+        run: () => {
+          tapTempo();
+        },
+      },
+      {
+        group: "Takes",
+        id: "takes.record",
+        label: "Record or stop recording",
+        run: () => {
+          toggleRecord().catch(() => undefined);
+        },
+      },
+      {
+        group: "Takes",
+        id: "takes.keep30",
+        label: "Keep the last 30 seconds",
+        run: () => {
+          captureLast(30).catch(() => undefined);
+        },
+      },
+      {
+        group: "Takes",
+        id: "takes.keep60",
+        label: "Keep the last minute",
+        run: () => {
+          captureLast(60).catch(() => undefined);
+        },
+      },
+      {
+        group: "Takes",
+        id: "takes.open",
+        label: "Show takes",
+        run: () => setTakes(true),
+      },
+      {
+        group: "Style",
+        id: "prompt.focus",
+        label: "Type a new prompt",
+        run: () => {
+          if (useStudio.getState().mixMode !== "list") {
+            useStudio.getState().patch({ mixMode: "list" });
+          }
+          window.setTimeout(() => promptInput.current?.focus(), 0);
+        },
+      },
+      {
+        group: "Style",
+        id: "style.mode",
+        label: "Switch between List and Space",
+        run: () => {
+          const studio = useStudio.getState();
+          studio.patch({
+            mixMode: studio.mixMode === "list" ? "space" : "list",
+          });
+        },
+      },
+      {
+        group: "Style",
+        id: "style.orbit",
+        label: "Orbit the listener",
+        run: () => {
+          const studio = useStudio.getState();
+          studio.patch({ mixMode: "space", orbit: studio.orbit > 0 ? 0 : 0.5 });
+        },
+      },
+      {
+        group: "Notes",
+        id: "notes.hold",
+        label: "Hold on or off",
+        run: () => setHold(!useStudio.getState().hold),
+      },
+      {
+        group: "Notes",
+        id: "notes.release",
+        label: "Release every note",
+        run: allNotesOff,
+      },
+      {
+        group: "Notes",
+        id: "notes.mode",
+        label: "Switch between Jam and Solo",
+        run: () => {
+          const studio = useStudio.getState();
+          studio.patch({
+            noteMode: studio.noteMode === "jam" ? "solo" : "jam",
+          });
+        },
+      },
+      {
+        group: "Notes",
+        id: "notes.progression",
+        label: "Play or stop the chord progression",
+        run: toggleProgression,
+      },
+      {
+        group: "Model",
+        id: "drums.cycle",
+        label: "Drums: auto, on, off",
+        run: () => {
+          const order = ["auto", "on", "off"] as const;
+          const studio = useStudio.getState();
+          const next =
+            order[(order.indexOf(studio.drums) + 1) % order.length] ?? "auto";
+          studio.patch({ drums: next });
+        },
+      },
+      {
+        group: "MIDI",
+        id: "midi.learn",
+        label: "MIDI learn on or off",
+        run: () => {
+          const live = useLive.getState();
+          useLive.setState({ learn: !live.learn, learnTarget: null });
+        },
+      },
+      {
+        group: "Help",
+        id: "help.open",
+        label: "Shortcuts and tips",
+        run: openHelp,
+      },
+      {
+        group: "Style",
+        id: "library.open",
+        label: "Open the sound library",
+        run: () => setLibrary(true),
+      },
+      ...Array.from({ length: 8 }, (_, index) => ({
+        group: "Scenes",
+        id: `scene.${index + 1}`,
+        label: `Recall scene ${index + 1}`,
+        run: () => recallScene(index),
+      })),
+      ...Array.from({ length: 8 }, (_, index) => ({
+        group: "Scenes",
+        id: `scene.save.${index + 1}`,
+        label: `Save scene ${index + 1}`,
+        run: () => saveScene(index),
+      })),
+    ];
+    return registerActions(list);
+  }, [openHelp]);
+
+  if (!ready) {
+    return <div className="h-dvh w-screen bg-[#09080b]" />;
+  }
 
   return (
-    <div className="flex h-dvh w-screen flex-col overflow-hidden bg-neutral-950 text-white">
-      <header className="flex items-center justify-between gap-4 px-6 py-4">
-        <div className="flex items-center gap-3">
-          {phase === "live" ? (
-            <button
-              className="rounded-full bg-white px-4 py-1.5 font-medium text-black text-sm"
-              onClick={stopStream}
-              type="button"
-            >
-              Stop
-            </button>
-          ) : (
-            <button
-              className="rounded-full bg-orange-500 px-4 py-1.5 font-medium text-black text-sm disabled:opacity-40"
-              disabled={loadDisabled}
-              onClick={() => {
-                loadAndPlay().catch(() => undefined);
-              }}
-              type="button"
-            >
-              {phase === "loading" ? "Loading" : "Load model"}
-            </button>
-          )}
-          <span className="max-w-80 truncate text-sm text-white/60">
-            {status}
-          </span>
+    <TooltipProvider delayDuration={450}>
+      <div className="relative flex h-dvh w-screen flex-col overflow-hidden bg-[#09080b] text-white">
+        <Ambience />
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <TopBar
+            onHelp={openHelp}
+            onPalette={openPalette}
+            onTakes={() => setTakes(true)}
+          />
+          <EngineBanner />
+          <main className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_392px] gap-3 p-3">
+            <div className="flex min-h-0 flex-col gap-3">
+              <StylePanel
+                inputRef={promptInput}
+                onAudio={setAudioSource}
+                onLibrary={() => setLibrary(true)}
+              />
+              <Visualizer className="h-[clamp(96px,17vh,176px)] shrink-0" />
+            </div>
+            <div className="flex min-h-0 flex-col gap-3 overflow-y-auto [scrollbar-width:thin]">
+              <ModelPanel />
+              <ScenesPanel />
+              <FxPanel />
+            </div>
+          </main>
+          <div className="px-3 pb-3">
+            <NotesDock />
+          </div>
         </div>
-        <div className="text-sm text-white/70 tabular-nums">
-          {latency === null ? "" : `${latency.toFixed(1)} ms`}
-        </div>
-      </header>
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-8 px-6 pb-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(340px,0.8fr)]">
-        <PromptStack
-          draft={draft}
-          onAdd={addPrompt}
-          onDraft={setDraft}
-          onRemove={(id) =>
-            setPrompts((current) =>
-              current.filter((prompt) => prompt.id !== id)
-            )
-          }
-          onText={(id, text) =>
-            setPrompts((current) =>
-              current.map((prompt) =>
-                prompt.id === id ? { ...prompt, text } : prompt
-              )
-            )
-          }
-          onWeight={(id, weight) =>
-            setPrompts((current) =>
-              current.map((prompt) =>
-                prompt.id === id ? { ...prompt, weight } : prompt
-              )
-            )
-          }
-          prompts={prompts}
+        <CommandPalette
+          onOpenChange={setPalette}
+          open={palette}
+          shortcuts={SHORTCUT_LABELS}
         />
-        <PlayColumn
-          drumGuide={drumGuide}
-          drums={drums}
-          gate={gate}
-          held={held}
-          instGuide={instGuide}
-          onDown={holdNote}
-          onDrumGuide={setDrumGuide}
-          onDrums={setDrums}
-          onGate={setGate}
-          onInstGuide={setInstGuide}
-          onTemperature={setTemperature}
-          onTextGuide={setTextGuide}
-          onTopK={setTopK}
-          onUp={releaseNote}
-          onVolume={setVolume}
-          temperature={temperature}
-          textGuide={textGuide}
-          topK={topK}
-          volume={volume}
+        <HelpDialog onOpenChange={setHelp} open={help} />
+        <LibraryDialog onOpenChange={setLibrary} open={library} />
+        <TakesSheet
+          onOpenChange={setTakes}
+          onStyle={setAudioSource}
+          open={takes}
         />
+        <AudioPromptDialog
+          onClose={() => setAudioSource(null)}
+          source={audioSource}
+        />
+        <Toaster position="bottom-center" theme="dark" />
       </div>
-    </div>
+    </TooltipProvider>
   );
 }
