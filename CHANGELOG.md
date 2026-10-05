@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.3](https://github.com/stepupgaming/magenta-windows/compare/v0.1.2...v0.1.3) (2026-10-05)
+
+
+### Bug Fixes
+
+* build each Windows release on its own and open the dev window on a free port ([#5](https://github.com/stepupgaming/magenta-windows/issues/5)) ([3d0a299](https://github.com/stepupgaming/magenta-windows/commit/3d0a29959b871d257a8fcd2eee350b445e0dc8ce))
+* keep the changelog and the credit for Google's weights in each release's notes ([3d0a299](https://github.com/stepupgaming/magenta-windows/commit/3d0a29959b871d257a8fcd2eee350b445e0dc8ce))
+* say the first-launch setup is checking for the checkpoint, not downloading it ([3d0a299](https://github.com/stepupgaming/magenta-windows/commit/3d0a29959b871d257a8fcd2eee350b445e0dc8ce))
+
 ## [0.1.2](https://github.com/stepupgaming/magenta-windows/compare/v0.1.1...v0.1.2) (2026-10-05)
 
 
