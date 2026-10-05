@@ -113,7 +113,7 @@ Pack or check the splitter without touching the GPU:
 python .\scripts\release_weights.py self-test
 ```
 
-Release Please opens a release PR, and merging it tags the version. That tag starts the `Release Windows` workflow only when the `RELEASE_PLEASE_TOKEN` secret holds a personal access token, because tags made with the default workflow token start no workflows. Without it, run `Release Windows` with the new tag, such as `v0.1.2`. Its last job writes the release notes: the download link, that version's `CHANGELOG.md` section, and the credit for Google's weights.
+Release Please opens a release PR. Merging it tags the version, and the `Release` workflow then starts `Release Windows` for that tag, which uploads `Magenta.exe` and the weight parts. To rebuild a release, run `Release Windows` with its tag, such as `v0.1.2`. Its last job writes the release notes: the download link, that version's `CHANGELOG.md` section, and the credit for Google's weights.
 
 ```powershell
 python .\scripts\release_notes.py write v0.1.2 --out notes.md

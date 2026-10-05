@@ -8,6 +8,7 @@ on:
       - master
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
   issues: write
@@ -33,3 +34,14 @@ jobs:
           if [ -n "$LATEST_TAG" ]; then
             gh release edit "$LATEST_TAG" --repo ${{ github.repository }} --latest
           fi
+
+      # A tag made with the workflow token starts no workflows, but a dispatch
+      # does, so start the Windows build for the new tag here.
+      - name: Build the Windows release
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          gh workflow run release-windows.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG" \
+            -f tag="$TAG" -f pack_weights=true -f build_exe=true

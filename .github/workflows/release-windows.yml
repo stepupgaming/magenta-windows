@@ -1,8 +1,7 @@
 name: Release Windows
 
-# A tag push starts this only when Release Please tags with a personal token
-# (the RELEASE_PLEASE_TOKEN secret). Tags it makes with the workflow token start
-# no workflows, so without that secret run this by hand with the new tag.
+# release.yml dispatches this for each tag Release Please creates. It does not
+# also listen for tag pushes, so a release never builds twice.
 on:
   workflow_dispatch:
     inputs:
@@ -20,9 +19,6 @@ on:
         required: false
         type: boolean
         default: true
-  push:
-    tags:
-      - "v*.*.*"
 
 permissions:
   contents: write
@@ -30,7 +26,7 @@ permissions:
 jobs:
   weights:
     name: Pack weights and publish the Windows release
-    if: ${{ github.event_name == 'push' || inputs.pack_weights }}
+    if: ${{ inputs.pack_weights }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -57,7 +53,7 @@ jobs:
       - name: Create the GitHub release and upload the weight parts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ inputs.tag }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" release-weights/* --clobber
@@ -70,7 +66,7 @@ jobs:
 
   app:
     name: Build Magenta.exe
-    if: ${{ github.event_name == 'push' || inputs.build_exe }}
+    if: ${{ inputs.build_exe }}
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -103,7 +99,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ inputs.tag }}
         run: |
           $tag = $env:TAG
           $exe = "apps\native\src-tauri\target\release\Magenta.exe"
@@ -138,7 +134,7 @@ jobs:
       - name: Put the download, the changelog, and the weights credit on the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ inputs.tag }}
         run: |
           python3 scripts/release_notes.py write "$TAG" --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/notes.md"
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/notes.md"
