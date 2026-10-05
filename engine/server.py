@@ -73,6 +73,12 @@ CLIP_KEEP = 4
 # Heard frames decoded into a fresh codec state, so the first continuation audio
 # is the clip's own last heard frame and the join has no seam.
 CODEC_WARMUP_FRAMES = 32
+# Of those, frames whose audio is not sent: a fresh codec state needs context
+# before its output matches a decode of the whole clip.
+CODEC_SETTLE_FRAMES = 16
+# The clip's own sound, as the codec hears it, played ahead of the continuation.
+CLIP_LEAD_SECONDS = 2.0
+CLIP_LEAD_MAX_SECONDS = 8.0
 DRUM_MODES = {"auto": None, "on": [1], "off": [0]}
 
 _model: Any = None
@@ -376,6 +382,17 @@ def clean_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def clean_lead(raw: Any) -> float:
+    """Seconds of a clip to play ahead of its continuation."""
+    try:
+        lead = float(raw)
+    except (TypeError, ValueError):
+        return CLIP_LEAD_SECONDS
+    if not np.isfinite(lead):
+        return CLIP_LEAD_SECONDS
+    return float(np.clip(lead, 0.0, CLIP_LEAD_MAX_SECONDS))
+
+
 def clean_slot(raw: Any) -> str | None:
     """A groove slot name from the window, such as "scene-3"."""
     if not isinstance(raw, str):
@@ -574,14 +591,19 @@ class Session:
         self._spec_key = None
         self._apply(spec, flush=True)
 
-    def continue_from(self, samples: np.ndarray, spec: dict[str, Any]) -> float:
+    def continue_from(
+        self, samples: np.ndarray, spec: dict[str, Any], lead: float = 0.0
+    ) -> tuple[np.ndarray, float]:
         """Make the model continue a 48 kHz stereo clip, [samples, 2], from its end.
 
         Encodes the last 28 s, trims the encoder's unreliable edges, and fills
         the model's memory with what it would hold after playing those frames.
         Style and notes are masked while it hears them, as in Google's engine:
         the clip is the context, and the spec steers only what comes next.
-        Returns how many seconds before the clip's end the stream picks up."""
+
+        Returns the clip's last `lead` seconds before the pickup as the codec
+        decodes them, to play ahead of the continuation with no seam, and how
+        many seconds before the clip's end the new music starts."""
         if self.streamer is None:
             raise RuntimeError("session is not started")
         if _clip_encoder is None:
@@ -597,12 +619,18 @@ class Session:
         drums = [0] if spec["drums"] == "off" else [-1]
         cond = self.model._conditioning([-1] * STYLE_TOKENS, [-1] * self.model.num_notes, drums, [-1, -1, -1])
         self.streamer.load_context(heard, self.model.depthformer.encode(cond).to(self.model._dt))
+        # The codec has one frame of latency: decoding heard frames returns audio
+        # up to the second to last, and the next decode starts with the last one.
+        lead_frames = min(round(lead * FRAMES_PER_SECOND), heard.shape[1] - 1 - CODEC_SETTLE_FRAMES)
+        context = max(CODEC_WARMUP_FRAMES, lead_frames + CODEC_SETTLE_FRAMES + 1)
         self.decode_state = self.model.init_decode_state()
-        self.model.decode_stream(heard[:, -CODEC_WARMUP_FRAMES:], self.decode_state)
+        warm = self.model.decode_stream(heard[:, -context:], self.decode_state)
+        keep = max(0, lead_frames) * SAMPLES_PER_FRAME
+        lead_audio = warm[0, warm.shape[1] - keep :].float().cpu().numpy() if keep else np.zeros((0, 2), np.float32)
         self._spec_key = None
         self._sustain_source = None
         self._apply(spec)
-        return (CLIP_TRIM_FRAMES + 1) * FRAME_SECONDS
+        return lead_audio, (CLIP_TRIM_FRAMES + 1) * FRAME_SECONDS
 
     def revive(self, spec: dict[str, Any]) -> None:
         """Bring a model that fell silent back to the memory it had after priming."""
@@ -836,6 +864,7 @@ async def stream_ws(websocket: WebSocket) -> None:
             flush = False
             groove: str | None = None
             clip: str | None = None
+            lead = CLIP_LEAD_SECONDS
             while True:
                 try:
                     payload = await take_message(0)
@@ -861,7 +890,9 @@ async def stream_ws(websocket: WebSocket) -> None:
                 restart = restart or op == "restart"
                 flush = flush or bool(payload.get("cut", False))
                 groove = clean_slot(payload.get("groove")) or groove
-                clip = clean_slot(payload.get("continue")) or clip
+                if clean_slot(payload.get("continue")):
+                    clip = clean_slot(payload.get("continue"))
+                    lead = clean_lead(payload.get("lead"))
             if restart:
                 # A fresh session clears the model's memory.
                 await asyncio.to_thread(lane.call, session.close)
@@ -882,13 +913,25 @@ async def stream_ws(websocket: WebSocket) -> None:
                 failure = "The clip expired on the engine. Send it again." if samples is None else None
                 if samples is not None:
                     try:
-                        rewind = await asyncio.to_thread(lane.call, session.continue_from, samples, current)
+                        lead_audio, pickup = await asyncio.to_thread(
+                            lane.call, session.continue_from, samples, current, lead
+                        )
                     except (RuntimeError, ValueError) as exc:
                         failure = str(exc)
                     else:
-                        # Every byte after this message is the continuation.
-                        await websocket.send_json({"type": "continued", "clip": clip, "rewind": rewind})
-                        sent = 0
+                        # Every byte after this message is the clip's lead-in, then
+                        # the continuation.
+                        await websocket.send_json(
+                            {
+                                "type": "continued",
+                                "clip": clip,
+                                "lead": round(lead_audio.shape[0] / SAMPLE_RATE, 3),
+                                "pickup": round(pickup, 3),
+                            }
+                        )
+                        if lead_audio.size:
+                            await websocket.send_bytes(pcm_bytes(lead_audio))
+                        sent = int(lead_audio.shape[0])
                         wall = time.perf_counter()
                         watch.reset()
                 if failure is not None:
@@ -937,8 +980,9 @@ def render(
     lead_in: float = 0.0,
 ) -> None:
     """Write `seconds` of music to a wav. With `continue_clip` (48 kHz stereo),
-    the music continues that clip, and the wav starts with its last `lead_in`
-    seconds before the point where the model picks up."""
+    the music continues that clip, and the wav starts with up to `lead_in`
+    seconds of the clip before the point where the model picks up, as the codec
+    decodes them, so the join has no seam."""
     import soundfile as sf
 
     spec = clean_spec(spec)
@@ -950,12 +994,10 @@ def render(
         target = int(seconds * SAMPLE_RATE)
         pieces: list[np.ndarray] = []
         if continue_clip is not None:
-            rewind = session.continue_from(continue_clip, spec)
-            pickup = continue_clip.shape[0] - round(rewind * SAMPLE_RATE)
-            start = max(0, pickup - round(lead_in * SAMPLE_RATE))
-            pieces.append(continue_clip[start:pickup])
-            target += pickup - start
-            print(f"[magenta] continuing {rewind:.2f}s before the end of the clip", flush=True)
+            lead_audio, pickup = session.continue_from(continue_clip, spec, lead_in)
+            pieces.append(lead_audio)
+            target += int(lead_audio.shape[0])
+            print(f"[magenta] continuing {pickup:.2f}s before the end of the clip", flush=True)
         got = sum(int(piece.shape[0]) for piece in pieces)
         started = time.perf_counter()
         while got < target:

@@ -328,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="lead_in",
         type=float,
         default=4.0,
-        help="With --continue, seconds of the original to keep before the continuation.",
+        help="With --continue, seconds of the clip to keep before the continuation, as the codec decodes them.",
     )
     add_port(generate)
     generate.set_defaults(func=cmd_generate)
