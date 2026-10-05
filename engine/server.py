@@ -701,6 +701,18 @@ def pcm_bytes(samples: np.ndarray) -> bytes:
     return (clipped * 32767.0).astype("<i2").tobytes()
 
 
+def cuda_memory() -> dict[str, int] | None:
+    """This process's GPU memory in MB: what tensors hold, and what PyTorch keeps
+    for them. Other programs on the GPU don't count. None until CUDA is in use,
+    since asking earlier would start CUDA in an idle engine."""
+    if not torch.cuda.is_available() or not torch.cuda.is_initialized():
+        return None
+    return {
+        "allocated_mb": round(torch.cuda.memory_allocated() / 2**20),
+        "reserved_mb": round(torch.cuda.memory_reserved() / 2**20),
+    }
+
+
 def health() -> dict[str, Any]:
     gpu = None
     if torch.cuda.is_available():
@@ -711,6 +723,7 @@ def health() -> dict[str, Any]:
         "model_loaded": _model is not None,
         "error": _model_error,
         "gpu": gpu,
+        "cuda_memory": cuda_memory(),
         "sample_rate": SAMPLE_RATE,
         "text_mapper": _text_mapper_state,
         "text_mapper_detail": _text_mapper_detail,
