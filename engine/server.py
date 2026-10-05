@@ -38,6 +38,7 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from magenta_win.text_mapper import MapperFormatError, TextMapper
 from magenta_win.text_mapper_file import locate_mapper
+from magenta_win.watchdog import SilenceWatch, expects_silence
 
 ENGINE_ROOT = Path(__file__).resolve().parent
 MODEL_CODE = ENGINE_ROOT / "model_code"
@@ -48,6 +49,12 @@ FRAMES_PER_SECOND = 25
 SAMPLES_PER_FRAME = SAMPLE_RATE // FRAMES_PER_SECOND
 PORT = int(os.environ.get("MAGENTA_PORT", "8765"))
 STYLE_TOKENS = 12
+# Google's engine steers with only the 6 coarsest of the 12 style tokens and
+# masks the finer ones. The model was trained with random masking of that tail,
+# so fewer levels is an input it knows.
+STYLE_LEVELS = 6
+# Remembered grooves kept per stream: one per scene, plus room to spare.
+GROOVES_KEPT = 16
 AUDIO_PROMPT_RATE = 16_000
 AUDIO_PROMPT_MIN_SECONDS = 0.5
 AUDIO_PROMPT_MAX_SECONDS = 60.0
@@ -223,6 +230,11 @@ def quantize(model: Any, embedding: torch.Tensor) -> list[int]:
     return [int(token) for token in tokens]
 
 
+def mask_style_levels(tokens: list[int], levels: int) -> list[int]:
+    """Keep the `levels` coarsest style tokens and mask the rest (-1)."""
+    return [token if index < levels else -1 for index, token in enumerate(tokens)]
+
+
 def clean_notes(raw: Any) -> list[int] | None:
     """128 pitch slots: -1 masked, 0 off, 1 sustain, 2 onset, 3 on (model picks)."""
     if not isinstance(raw, list) or len(raw) == 0:
@@ -290,13 +302,23 @@ def clean_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         "onsets": bool(raw.get("onsets", False)),
         "drums": clean_drums(raw.get("drums", False)),
         "seed": int(raw.get("seed", 0)),
+        "style_levels": int(np.clip(int(raw.get("style_levels", STYLE_LEVELS)), 1, STYLE_TOKENS)),
     }
+
+
+def clean_slot(raw: Any) -> str | None:
+    """A groove slot name from the window, such as "scene-3"."""
+    if not isinstance(raw, str):
+        return None
+    slot = raw.strip()[:40]
+    return slot or None
 
 
 def _spec_key(spec: dict[str, Any]) -> tuple[Any, ...]:
     notes = spec["notes"]
     return (
         tuple((item["text"], round(float(item["weight"]), 4)) for item in spec["prompts"]),
+        spec["style_levels"],
         None if notes is None else tuple(int(note) for note in notes),
         spec["drums"],
         round(float(spec["cfg_musiccoca"]), 3),
@@ -353,7 +375,10 @@ class Session:
         self._spec_key: tuple[Any, ...] | None = None
         self._held: frozenset[int] = frozenset()
         self._sustain_source: torch.Tensor | None = None
+        # The memory right after priming, to revive the model from.
+        self._factory: dict[str, Any] | None = None
         self.top_k = 48
+        self.seed = 0
 
     def _embed(self, item: dict[str, Any]) -> torch.Tensor:
         key = item["text"]
@@ -380,7 +405,8 @@ class Session:
             return [-1] * STYLE_TOKENS
         embeddings = [self._embed(item) for item in spec["prompts"]]
         weights = [float(item["weight"]) for item in spec["prompts"]]
-        return quantize(self.model, blend_embeddings(embeddings, weights))
+        tokens = quantize(self.model, blend_embeddings(embeddings, weights))
+        return mask_style_levels(tokens, spec["style_levels"])
 
     def _encode(self, tokens: list[int], notes: list[int] | None, drums: list[int] | None, spec: dict[str, Any]) -> torch.Tensor:
         cond = self.model._resolve_conditioning(
@@ -402,6 +428,7 @@ class Session:
     def start(self, spec: dict[str, Any]) -> None:
         tokens, notes, drums, source = self._source(spec)
         self.top_k = int(spec["top_k"])
+        self.seed = int(spec["seed"])
         self.streamer = self.model.make_cudagraph_streamer(
             style=tokens,
             notes=notes,
@@ -411,9 +438,11 @@ class Session:
             cfg_drums=spec["cfg_drums"],
             temperature=spec["temperature"],
             top_k=self.top_k,
-            seed=int(spec["seed"]),
+            seed=self.seed,
             guidance=False,
         )
+        self.top_k = self.streamer.top_k
+        self._factory = self.streamer.snapshot()
         self.decode_state = self.model.init_decode_state()
         self._held = held_pitches(notes) if spec["onsets"] else frozenset()
         if self._held and notes is not None:
@@ -451,6 +480,37 @@ class Session:
             self._spec_key = key
             self.signature = key
         self.streamer.set_temperature(spec["temperature"])
+        if int(spec["top_k"]) != self.top_k:
+            self.streamer.set_top_k(int(spec["top_k"]))
+            self.top_k = self.streamer.top_k
+        if int(spec["seed"]) != self.seed:
+            self.seed = int(spec["seed"])
+            self.streamer.set_seed(self.seed)
+
+    def remember(self) -> dict[str, Any]:
+        """Copy the model's memory so `recall` can jump back to this moment."""
+        if self.streamer is None:
+            raise RuntimeError("session is not started")
+        return self.streamer.snapshot()
+
+    def recall(self, memory: dict[str, Any], spec: dict[str, Any]) -> None:
+        """Continue from a remembered moment with this spec. The sampler restarts
+        from the spec's seed, so recalling the same groove plays out the same way."""
+        if self.streamer is None:
+            raise RuntimeError("session is not started")
+        self.streamer.restore(memory)
+        self.seed = int(spec["seed"])
+        self.streamer.set_seed(self.seed)
+        self._spec_key = None
+        self._apply(spec, flush=True)
+
+    def revive(self, spec: dict[str, Any]) -> None:
+        """Bring a model that fell silent back to the memory it had after priming."""
+        if self.streamer is None or self._factory is None:
+            raise RuntimeError("session is not started")
+        self.streamer.restore(self._factory)
+        self._spec_key = None
+        self._apply(spec, flush=True)
 
     def _frame(self) -> torch.Tensor:
         piece = self.streamer.step()
@@ -574,8 +634,8 @@ async def post_audio_prompt(request: Request) -> dict[str, Any]:
 
 def apply_client_message(payload: dict[str, Any], spec: dict[str, Any]) -> tuple[dict[str, Any], str]:
     op = str(payload.get("op") or "")
-    if op == "stop":
-        return spec, "stop"
+    if op in {"stop", "remember", "forget"}:
+        return spec, op
     if op in {"start", "steer", "restart"}:
         return clean_spec(payload), op
     return spec, "ignore"
@@ -654,9 +714,14 @@ async def stream_ws(websocket: WebSocket) -> None:
         sent = 0
         wall = time.perf_counter()
         last_stats = 0.0
+        # Remembered moments of this stream, by slot. They outlive a restart,
+        # since every session of one model has the same memory shape.
+        grooves: OrderedDict[str, Any] = OrderedDict()
+        watch = SilenceWatch()
         while True:
             restart = False
             flush = False
+            groove: str | None = None
             while True:
                 try:
                     payload = await take_message(0)
@@ -668,20 +733,43 @@ async def stream_ws(websocket: WebSocket) -> None:
                 if op == "stop":
                     await websocket.send_json({"type": "stopped"})
                     return
+                slot = clean_slot(payload.get("slot"))
+                if op == "remember" and slot:
+                    grooves[slot] = await asyncio.to_thread(lane.call, session.remember)
+                    grooves.move_to_end(slot)
+                    while len(grooves) > GROOVES_KEPT:
+                        grooves.popitem(last=False)
+                    await websocket.send_json({"type": "remembered", "slot": slot})
+                    continue
+                if op == "forget" and slot:
+                    grooves.pop(slot, None)
+                    continue
                 restart = restart or op == "restart"
                 flush = flush or bool(payload.get("cut", False))
+                groove = clean_slot(payload.get("groove")) or groove
             if restart:
-                # A fresh session clears the model's memory and applies the
-                # new seed and top_k, which the captured graph fixes.
+                # A fresh session clears the model's memory.
                 await asyncio.to_thread(lane.call, session.close)
                 session = await start_session(websocket, lane, spec)
                 sent = 0
                 wall = time.perf_counter()
+                watch.reset()
             current = spec
+            if groove:
+                memory = grooves.get(groove)
+                if memory is None:
+                    await websocket.send_json({"type": "forgotten", "slot": groove})
+                else:
+                    await asyncio.to_thread(lane.call, session.recall, memory, current)
+                    watch.reset()
             samples, frame_ms = await asyncio.to_thread(lane.call, session.step, current, 4, flush)
             if samples.size:
                 await websocket.send_bytes(pcm_bytes(samples))
                 sent += int(samples.shape[0])
+            if watch.observe(samples, SAMPLE_RATE, expects_silence(current["notes"])):
+                await asyncio.to_thread(lane.call, session.revive, current)
+                print("[magenta] the model fell silent, so it was revived", flush=True)
+                await websocket.send_json({"type": "revived", "count": watch.revivals})
             now = time.perf_counter()
             if now - last_stats >= 0.4:
                 last_stats = now
