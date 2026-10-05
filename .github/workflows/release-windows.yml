@@ -1,21 +1,24 @@
 name: Release Windows
 
+# release.yml dispatches this for each tag Release Please creates. It does not
+# also listen for tag pushes, so a release never builds twice.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example v0.1.0"
+        description: "Release tag, for example v0.1.2"
         required: true
         type: string
-        default: "v0.1.0"
       pack_weights:
         description: "Download and upload the checkpoint parts"
         required: false
         type: boolean
         default: true
-  push:
-    tags:
-      - "v*.*.*"
+      build_exe:
+        description: "Build and upload Magenta.exe"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -23,7 +26,7 @@ permissions:
 jobs:
   weights:
     name: Pack weights and publish the Windows release
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.pack_weights }}
+    if: ${{ inputs.pack_weights }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -50,32 +53,20 @@ jobs:
       - name: Create the GitHub release and upload the weight parts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          NOTES=$(cat <<'EOF'
-          Download Magenta.exe and run it.
-
-          First launch installs the CUDA engine and downloads the checkpoint. The part files on this release are the weights. There is no separate installer.
-
-          https://github.com/stepupgaming/magenta-windows/releases/latest/download/Magenta.exe
-          EOF
-          )
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" release-weights/* --clobber
-            gh release edit "$TAG" --notes "$NOTES"
           else
             gh release create "$TAG" release-weights/* \
               --target "${GITHUB_SHA}" \
               --title "$TAG" \
-              --notes "$NOTES"
+              --notes "Download Magenta.exe and run it."
           fi
 
   app:
     name: Build Magenta.exe
+    if: ${{ inputs.build_exe }}
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -108,12 +99,9 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
         run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ inputs.tag }}"
-          } else {
-            $tag = "${{ github.ref_name }}"
-          }
+          $tag = $env:TAG
           $exe = "apps\native\src-tauri\target\release\Magenta.exe"
           if (-not (Test-Path $exe)) {
             Get-ChildItem "apps\native\src-tauri\target\release" -Filter *.exe | Select-Object -ExpandProperty Name
@@ -131,15 +119,22 @@ jobs:
           }
           gh release upload $tag $exe --repo ${{ github.repository }} --clobber
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $notes = @(
-            "Download Magenta.exe and run it."
-            ""
-            "First launch installs the CUDA engine and downloads the checkpoint. The part files on this release are the weights. There is no separate installer."
-            ""
-            "https://github.com/stepupgaming/magenta-windows/releases/latest/download/Magenta.exe"
-          ) -join "`n"
-          $notesPath = Join-Path $env:RUNNER_TEMP "magenta-notes.md"
-          [System.IO.File]::WriteAllText($notesPath, $notes)
-          gh release edit $tag --repo ${{ github.repository }} --notes-file $notesPath
           gh release delete-asset $tag install.ps1 --repo ${{ github.repository }} -y
           exit 0
+
+  notes:
+    name: Write the release notes
+    needs: [weights, app]
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Put the download, the changelog, and the weights credit on the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          python3 scripts/release_notes.py write "$TAG" --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/notes.md"
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/notes.md"

@@ -39,4 +39,4 @@ From the repo root:
 
 Weight lookup lives in `engine/magenta_win/cache_path.py`. `scripts/release_weights.py ensure` uses a local snapshot first, then the GitHub release parts. `python .\scripts\release_weights.py self-test` checks the splitter without a GPU.
 
-The Windows release workflow is `.github/workflows/release-windows.yml`. Run it with a tag such as `v0.1.0`, or push a `v*.*.*` tag. It downloads the public Hugging Face checkpoints on the runner. Do not upload Steve's `F:\` cache by hand.
+The Windows release workflow is `.github/workflows/release-windows.yml`. `.github/workflows/release.yml` starts it for each tag Release Please creates. Run it by hand with a tag such as `v0.1.2` to rebuild that release. It downloads the public Hugging Face checkpoints on the runner, then `scripts/release_notes.py` writes the notes from `CHANGELOG.md`. Do not upload Steve's `F:\` cache by hand.
