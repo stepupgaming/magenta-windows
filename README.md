@@ -60,6 +60,8 @@ pnpm dev
 
 The window still starts `engine\server.py` with no flags. That process listens on `127.0.0.1:8765`.
 
+To check a GPU, close the window and double-click `gpu-check.bat`. It times `magenta generate` on 20 s of techno, continues that file, then streams from the engine for 10 minutes while it moves three style faders four times a second, changes choices and seed, plays chords, saves and recalls a groove, continues from the stream, and restarts once. It samples GPU memory every 10 seconds and writes `engine\logs\gpu-check\<time>\report.txt` with the wavs it made. `gpu-check.bat --minutes 3` shortens the live part.
+
 ## The stage
 
 The window has five areas. Every control can also be reached from the command palette (Ctrl K), and `?` lists the shortcuts.
