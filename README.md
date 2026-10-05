@@ -56,7 +56,7 @@ pnpm dev
 
 `bun run dev` and `pnpm dev` both run `bin/dev.mjs`, which runs `pnpm --filter native tauri dev`. That opens the desktop window at http://localhost:3000. `pnpm web dev` is the browser shell on port 3001.
 
-`generate` defaults: temperature 1.05, top-k 48, style 2.4, note strength 0.8, drums off, seed 7, wav path `magenta.wav`. `--seconds` is required and the maximum is 120. Repeat `--prompt` up to 8 times. A weight is `TEXT:WEIGHT`. The full menu is `magenta generate --help`.
+`generate` defaults: temperature 1.05, top-k 48, style 2.4, style detail 6, note strength 0.8, drums off, seed 7, wav path `magenta.wav`. `--seconds` is required and the maximum is 120. Repeat `--prompt` up to 8 times. A weight is `TEXT:WEIGHT`. The full menu is `magenta generate --help`.
 
 The window still starts `engine\server.py` with no flags. That process listens on `127.0.0.1:8765`.
 
@@ -65,8 +65,8 @@ The window still starts `engine\server.py` with no flags. That process listens o
 The window has five areas. Every control can also be reached from the command palette (Ctrl K), and `?` lists the shortcuts.
 
 - **Style.** Up to eight prompts, blended by weight. List mode gives each prompt a fader with mute and solo. Space mode places prompts in a field and blends them by distance from a listener you drag, fling, or set to orbit. A prompt can be text or a slice of an audio file (drop one on the panel). The Library (/) searches several hundred prompts by genre, instrument, mood, texture, region, and era. It has starter blends, favorites, recents, and preview as you browse.
-- **Model.** Style strength, note strength, temperature, and a spring-loaded Chaos knob that the pitch wheel also drives. Drums are auto, on, or off. Choices (top-k) and the seed apply on a fresh start.
-- **Scenes.** Eight slots that store the prompts and knobs. Number keys recall them with a morph over a set number of beats, or a cut.
+- **Model.** Style strength, style detail, note strength, temperature, and a spring-loaded Chaos knob that the pitch wheel also drives. Style detail is how many of the 12 style tokens steer, coarsest first. Google's apps use 6, and so does the default. Drums are auto, on, or off. Choices (top-k) and the seed change while the music plays. Fresh clears the model's memory. If the model falls silent while it should be playing, the engine wakes it after six seconds and says so.
+- **Scenes.** Eight slots that store the prompts and knobs. Number keys recall them with a morph over a set number of beats, or a cut. A scene saved while playing also remembers the model's groove, and a cut back to it picks the music up from there.
 - **Notes.** Jam lets the model accompany the notes you hold. Solo plays only your notes. Hold latches chords, Strum lets held notes re-strike, Clearance keeps the model off neighboring semitones. The keys are A to ' on the home row, Z and X change octave. Chord pads follow a key, and a progression plays at the tempo.
 - **Effects and takes.** DJ filter, three-band EQ, tempo-synced echo, reverb, and a limiter run in the window. Rec records what you hear. Keep (C) saves the last 10 to 60 seconds that already played. Takes download as WAV or go back in as an audio prompt.
 
