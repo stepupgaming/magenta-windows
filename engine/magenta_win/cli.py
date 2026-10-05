@@ -138,7 +138,18 @@ def http_json(port: int, method: str, path: str, timeout: float) -> dict[str, An
 
 
 def print_health(payload: dict[str, Any]) -> None:
-    keys = ("ok", "backend", "model_loaded", "error", "gpu", "sample_rate", "text_mapper", "text_mapper_detail")
+    keys = (
+        "ok",
+        "backend",
+        "model_loaded",
+        "error",
+        "gpu",
+        "sample_rate",
+        "text_mapper",
+        "text_mapper_detail",
+        "clip_encoder",
+        "clip_encoder_detail",
+    )
     for key in keys:
         if key in payload:
             print(f"{key}: {payload[key]}")
@@ -191,10 +202,17 @@ def cmd_generate(args: argparse.Namespace) -> int:
             "generate loads the checkpoint in this process. A second copy fills the GPU."
         )
     spec = build_spec(args)
+    clip = None
+    if args.continue_from:
+        from magenta_win.clip_audio import load_clip
+
+        clip = load_clip(Path(args.continue_from))
+        if clip.shape[0] < 4 * 48_000:
+            raise SystemExit("--continue needs at least 4 seconds of audio.")
     prepare_import()
     from server import render
 
-    render(spec, float(args.seconds), Path(args.out))
+    render(spec, float(args.seconds), Path(args.out), continue_clip=clip, lead_in=float(args.lead_in))
     return 0
 
 
@@ -299,6 +317,19 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--drum-strength", type=float, default=1.0, help="Drum steer, from 0 to 4. Used only with --drums.")
     generate.add_argument("--note", action="append", type=int, default=[], help="MIDI note held for the whole file, from 0 to 127. Repeat to stack notes.")
     generate.add_argument("--seed", type=int, default=7, help="Sampler seed.")
+    generate.add_argument(
+        "--continue",
+        dest="continue_from",
+        metavar="AUDIO",
+        help="Continue this audio file (wav, flac, ogg) from its end. The last 28 s are heard.",
+    )
+    generate.add_argument(
+        "--lead-in",
+        dest="lead_in",
+        type=float,
+        default=4.0,
+        help="With --continue, seconds of the original to keep before the continuation.",
+    )
     add_port(generate)
     generate.set_defaults(func=cmd_generate)
     return parser

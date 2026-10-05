@@ -195,6 +195,25 @@ class CudaGraphStreamer:
                 self.CK[i].copy_(sk[:, -self.KEEP:]); self.CV[i].copy_(sv[:, -self.KEEP:])
 
     # ---- memory ----
+    def load_context(self, frames, source):
+        """Continue from heard music. `frames` [1,N,Q] are unique codes, for
+        example a clip run through the SpectroStream encoder. Fills the caches
+        the graph reads with what the model would hold after hearing them,
+        conditioned on `source` [1,1,enc], and makes frames[:, -1] the next
+        frame it embeds. One batched pass, no re-capture. The live source is
+        unchanged; `set_source` steers the continuation. N must exceed KEEP."""
+        if self.num_neg:
+            raise NotImplementedError("load_context does not support guidance batches")
+        n = frames.shape[1]
+        if n <= self.KEEP:
+            raise ValueError(f"a context needs more than {self.KEEP} frames, got {n}")
+        frames = frames.to(device=self.prev.device, dtype=torch.long)
+        self_kv, cross_kv = self.dec.context_kv(frames, source.to(self.source.dtype), self.KEEP)
+        for i in range(self.L):
+            self.SK[i].copy_(self_kv[i][0]); self.SV[i].copy_(self_kv[i][1])
+            self.CK[i].copy_(cross_kv[i][0]); self.CV[i].copy_(cross_kv[i][1])
+        self.prev.copy_(frames[:, -1:])
+
     def snapshot(self):
         """Copy the model's memory: temporal self/cross KV and the last frame.
         About 13 MB for the base model."""

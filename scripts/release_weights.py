@@ -7,6 +7,7 @@ so a release stores it as ordered parts plus magenta-weights.json.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import shutil
@@ -20,8 +21,8 @@ if str(ENGINE) not in sys.path:
     sys.path.insert(0, str(ENGINE))
 
 from magenta_win.cache_path import weight_cache
-from magenta_win import text_mapper_file
-from magenta_win.text_mapper_file import MAPPER_FILE, MAPPER_REPO, fetch_mapper, find_mapper
+from magenta_win import google_files, text_mapper_file
+from magenta_win.google_files import GOOGLE_REPO, GoogleFile
 
 REPOS = (
     "magenta-community/magenta-realtime-2",
@@ -97,18 +98,27 @@ def split_file(src: Path, out_dir: Path, chunk_bytes: int, counter: list[int]) -
     return {"size": size, "sha256": digest.hexdigest(), "parts": parts}
 
 
-def pack_text_mapper(cache: Path, out_dir: Path, chunk_bytes: int, counter: list[int]) -> dict[str, object] | None:
-    """Pack only the mapper from google/magenta-realtime-2, never the whole repo."""
-    path = find_mapper(cache)
+def google_items() -> list[GoogleFile]:
+    """Google's resource files that ride along with the weights: the text
+    mapper and the SpectroStream encoder and codebook that continuing from a
+    clip needs. Read when called, so the self-test can pin stand-in bytes."""
+    return [text_mapper_file.mapper(), google_files.SPECTROSTREAM_ENCODER, google_files.SPECTROSTREAM_QUANTIZER]
+
+
+def pack_google_file(
+    cache: Path, item: GoogleFile, out_dir: Path, chunk_bytes: int, counter: list[int]
+) -> dict[str, object] | None:
+    """Pack one verified file from google/magenta-realtime-2, never the whole repo."""
+    path = google_files.find(cache, item)
     if path is None:
-        print("no verified text mapper in the cache; the release goes out without it", flush=True)
+        print(f"no verified {item.name} in the cache; the release goes out without it", flush=True)
         return None
     packed = split_file(path, out_dir, chunk_bytes, counter)
     if packed is None:
         return None
-    snapshot = path.parents[len(Path(MAPPER_FILE).parts) - 1].name
-    print(f"packed {MAPPER_REPO}/{MAPPER_FILE} ({packed['size']} bytes)", flush=True)
-    return {"repo": MAPPER_REPO, "snapshot": snapshot, "file": MAPPER_FILE, **packed}
+    snapshot = path.parents[len(Path(item.file).parts) - 1].name
+    print(f"packed {GOOGLE_REPO}/{item.file} ({packed['size']} bytes)", flush=True)
+    return {"repo": GOOGLE_REPO, "snapshot": snapshot, "file": item.file, **packed}
 
 
 def pack(cache: Path, out_dir: Path, chunk_bytes: int) -> Path:
@@ -134,9 +144,10 @@ def pack(cache: Path, out_dir: Path, chunk_bytes: int) -> Path:
             print(f"packed {repo}/{path.name} ({packed['size']} bytes)", flush=True)
     if not files:
         raise SystemExit(f"No weight files found under {cache}")
-    mapper = pack_text_mapper(cache, out_dir, chunk_bytes, counter)
-    if mapper is not None:
-        files.append(mapper)
+    for item in google_items():
+        entry = pack_google_file(cache, item, out_dir, chunk_bytes, counter)
+        if entry is not None:
+            files.append(entry)
     manifest = {
         "format": 1,
         "files": files,
@@ -144,7 +155,9 @@ def pack(cache: Path, out_dir: Path, chunk_bytes: int) -> Path:
             "Parts are under GitHub's 2 GB asset limit. "
             "The bytes are the public Hugging Face files for "
             + " and ".join(REPOS)
-            + f", plus {MAPPER_FILE} from {MAPPER_REPO}."
+            + ", plus "
+            + ", ".join(item.file for item in google_items())
+            + f" from {GOOGLE_REPO}."
         ),
     }
     dest = out_dir / MANIFEST_NAME
@@ -210,8 +223,9 @@ def download_huggingface(cache: Path) -> None:
     for repo in REPOS:
         print(f"downloading {repo}", flush=True)
         snapshot_download(repo, cache_dir=str(cache))
-    if find_mapper(cache) is None:
-        fetch_mapper(cache, log=lambda message: print(message, flush=True))
+    for item in google_items():
+        if google_files.find(cache, item) is None:
+            google_files.fetch(cache, item, log=lambda message: print(message, flush=True))
 
 
 def ensure(cache: Path) -> None:
@@ -238,30 +252,50 @@ def self_test() -> None:
         other.mkdir(parents=True)
         (other / "text_encoder.pt").write_bytes(b"text" * 1000)
         (other / "quantizer.pt").write_bytes(b"q" * 2000)
-        mapper = repo_dir(cache, MAPPER_REPO) / "snapshots" / "gcs-1" / MAPPER_FILE
-        mapper.parent.mkdir(parents=True)
-        mapper.write_bytes(b"mapper" * 50_000)
-        # A full snapshot of the mapper's repo must not ride along.
-        (mapper.parents[2] / "huge.safetensors").write_bytes(b"x" * 1000)
-        # Pin the checksum to the stand-in bytes, since pack only ships a verified mapper.
-        pinned = (text_mapper_file.MAPPER_SIZE, text_mapper_file.MAPPER_SHA256)
-        text_mapper_file.MAPPER_SIZE = mapper.stat().st_size
-        text_mapper_file.MAPPER_SHA256 = hashlib.sha256(mapper.read_bytes()).hexdigest()
+        # Stand-ins for Google's files, with the pinned checksums swapped to
+        # match, since pack only ships verified copies.
+        stand_ins: dict[str, bytes] = {}
+        for index, item in enumerate(google_items()):
+            path = repo_dir(cache, GOOGLE_REPO) / "snapshots" / f"gcs-{index + 1}" / item.file
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(item.name.encode() * 5_000)
+            stand_ins[item.file] = path.read_bytes()
+        # A full snapshot of Google's repo must not ride along.
+        (repo_dir(cache, GOOGLE_REPO) / "snapshots" / "gcs-1" / "huge.safetensors").write_bytes(b"x" * 1000)
+        pinned = (
+            text_mapper_file.MAPPER_SIZE,
+            text_mapper_file.MAPPER_SHA256,
+            google_files.SPECTROSTREAM_ENCODER,
+            google_files.SPECTROSTREAM_QUANTIZER,
+        )
+        def pin(item: GoogleFile) -> GoogleFile:
+            data = stand_ins[item.file]
+            return dataclasses.replace(item, size=len(data), sha256=hashlib.sha256(data).hexdigest())
+        text_mapper_file.MAPPER_SIZE = len(stand_ins[text_mapper_file.MAPPER_FILE])
+        text_mapper_file.MAPPER_SHA256 = hashlib.sha256(stand_ins[text_mapper_file.MAPPER_FILE]).hexdigest()
+        google_files.SPECTROSTREAM_ENCODER = pin(google_files.SPECTROSTREAM_ENCODER)
+        google_files.SPECTROSTREAM_QUANTIZER = pin(google_files.SPECTROSTREAM_QUANTIZER)
         packed = root / "parts"
         try:
             pack(cache, packed, chunk_bytes=1024 * 1024)
         finally:
-            text_mapper_file.MAPPER_SIZE, text_mapper_file.MAPPER_SHA256 = pinned
+            (
+                text_mapper_file.MAPPER_SIZE,
+                text_mapper_file.MAPPER_SHA256,
+                google_files.SPECTROSTREAM_ENCODER,
+                google_files.SPECTROSTREAM_QUANTIZER,
+            ) = pinned
         restored = root / "restored"
         unpack(packed / MANIFEST_NAME, packed, restored)
         got = (repo_dir(restored, REPOS[0]) / "snapshots" / "abc" / "model.safetensors").read_bytes()
         if got != payload:
             raise SystemExit("self-test payload mismatch")
-        restored_mapper = repo_dir(restored, MAPPER_REPO) / "snapshots" / "gcs-1" / MAPPER_FILE
-        if restored_mapper.read_bytes() != mapper.read_bytes():
-            raise SystemExit("self-test mapper mismatch")
-        if (restored_mapper.parents[2] / "huge.safetensors").exists():
-            raise SystemExit("self-test packed more than the mapper")
+        for index, (file, data) in enumerate(stand_ins.items()):
+            restored_file = repo_dir(restored, GOOGLE_REPO) / "snapshots" / f"gcs-{index + 1}" / file
+            if restored_file.read_bytes() != data:
+                raise SystemExit(f"self-test mismatch for {file}")
+        if (repo_dir(restored, GOOGLE_REPO) / "snapshots" / "gcs-1" / "huge.safetensors").exists():
+            raise SystemExit("self-test packed more than Google's pinned files")
     print("self-test ok", flush=True)
 
 
