@@ -8,12 +8,13 @@
 //                                                       sum → volume → limiter → tap → master analyser → speakers
 //
 // The tap worklet meters every sample, keeps the last minute for retro
-// capture, and streams recordings.
+// capture, and streams recordings. The pcm worklet keeps the engine's own
+// audio as it played, before the stretch and the effects, for rewinding.
 
 import type { FxState } from "./types.ts";
 import { SAMPLE_RATE } from "./types.ts";
 
-const WORKLET_URL = "/pcm-worklet.js?v=5";
+const WORKLET_URL = "/pcm-worklet.js?v=6";
 const SMOOTH = 0.03;
 const LOW_PASS_FLOOR = 70;
 const HIGH_PASS_CEILING = 9000;
@@ -209,6 +210,8 @@ export class LiveAudio {
       const data = event.data as { kind?: string } & PlaybackStats;
       if (data?.kind === "stats") {
         this.onStats?.(data);
+      } else if (data?.kind === "history") {
+        this.fromHistory(event.data);
       }
     };
     this.tap.port.onmessage = (event: MessageEvent) => this.fromTap(event.data);
@@ -321,6 +324,31 @@ export class LiveAudio {
       this.captures.set(id, resolve);
       this.tap.port.postMessage({ id, kind: "capture", seconds });
     });
+  }
+
+  /**
+   * Up to `seconds` of the engine's audio as it played, ending `ago` seconds
+   * before what is playing now. Raw: no stretch, no effects, no volume.
+   */
+  history(seconds: number, ago: number): Promise<StereoClip> {
+    this.captureId += 1;
+    const id = this.captureId;
+    return new Promise((resolve) => {
+      this.captures.set(id, resolve);
+      this.pcm.port.postMessage({ ago, id, kind: "history", seconds });
+    });
+  }
+
+  private fromHistory(data: {
+    id?: number;
+    left?: Float32Array;
+    right?: Float32Array;
+  }): void {
+    const resolve = this.captures.get(data.id ?? -1);
+    this.captures.delete(data.id ?? -1);
+    if (resolve && data.left && data.right) {
+      resolve({ left: data.left, right: data.right, sampleRate: SAMPLE_RATE });
+    }
   }
 
   startRecording(): void {

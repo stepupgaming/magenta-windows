@@ -1,12 +1,19 @@
 // Audio clips: WAV export, waveform peaks, file decoding, the 16 kHz mono
-// resample the engine embeds, and IndexedDB storage for audio prompts.
+// resample the engine embeds, the 48 kHz stereo the engine continues from,
+// and IndexedDB storage for audio prompts.
 
 import type { StereoClip } from "./audio.ts";
+import { SAMPLE_RATE } from "./types.ts";
 
 /** MusicCoCa hears 16 kHz mono in 10 second windows. */
 export const PROMPT_RATE = 16_000;
 export const PROMPT_WINDOW = 10;
 export const PROMPT_MAX = 30;
+
+/** The engine hears up to 28 s of a clip it continues, as Google's engine does. */
+export const CONTINUE_MAX = 28;
+/** It trims a second from each end and needs about a second more to listen to. */
+export const CONTINUE_MIN = 4;
 
 export function encodeWav(clip: StereoClip): Blob {
   const frames = clip.left.length;
@@ -118,6 +125,51 @@ export async function toPromptClip(
   player.start();
   const rendered = await context.startRendering();
   return rendered.getChannelData(0).slice();
+}
+
+/** A clip at the engine's 48 kHz, resampling only when it is not already. */
+export async function toEngineRate(clip: StereoClip): Promise<StereoClip> {
+  if (clip.sampleRate === SAMPLE_RATE || clip.left.length === 0) {
+    return clip;
+  }
+  const frames = clip.left.length;
+  const source = new OfflineAudioContext(2, frames, clip.sampleRate);
+  const buffer = source.createBuffer(2, frames, clip.sampleRate);
+  buffer.copyToChannel(clip.left.slice(), 0);
+  buffer.copyToChannel(clip.right.slice(), 1);
+  const outFrames = Math.max(
+    1,
+    Math.round((frames / clip.sampleRate) * SAMPLE_RATE)
+  );
+  const context = new OfflineAudioContext(2, outFrames, SAMPLE_RATE);
+  const player = context.createBufferSource();
+  player.buffer = buffer;
+  player.connect(context.destination);
+  player.start();
+  const rendered = await context.startRendering();
+  return {
+    left: rendered.getChannelData(0).slice(),
+    right: rendered.getChannelData(1).slice(),
+    sampleRate: SAMPLE_RATE,
+  };
+}
+
+/** The last `seconds` of a clip as interleaved stereo float32. */
+export function interleaveTail(
+  clip: StereoClip,
+  seconds: number
+): Float32Array<ArrayBuffer> {
+  const frames = Math.min(
+    clip.left.length,
+    Math.round(seconds * clip.sampleRate)
+  );
+  const start = clip.left.length - frames;
+  const out = new Float32Array(frames * 2);
+  for (let index = 0; index < frames; index += 1) {
+    out[index * 2] = clip.left[start + index] ?? 0;
+    out[index * 2 + 1] = clip.right[start + index] ?? 0;
+  }
+  return out;
 }
 
 /** The loudest `seconds` window, a good default pick for a style clip. */

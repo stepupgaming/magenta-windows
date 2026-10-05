@@ -27,6 +27,7 @@ function typing(target: EventTarget | null): boolean {
 
 /** Single keys that run a registered action. */
 export const KEY_ACTIONS: Record<string, string> = {
+  Backspace: "continue.rewind",
   KeyB: "tempo.tap",
   KeyC: "takes.keep30",
   KeyM: "midi.learn",
@@ -37,6 +38,7 @@ export const KEY_ACTIONS: Record<string, string> = {
 };
 
 export const SHORTCUT_LABELS: Record<string, string> = {
+  "continue.rewind": "Backspace",
   "help.open": "?",
   "library.open": "/",
   "midi.learn": "M",

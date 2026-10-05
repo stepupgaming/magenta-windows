@@ -98,6 +98,9 @@ export type TextMapperState = "off" | "on" | "pending" | "unavailable";
 
 export interface EngineHealth {
   backend: string;
+  /** Google's SpectroStream encoder, for continuing from a clip. */
+  clip_encoder?: TextMapperState;
+  clip_encoder_detail?: string;
   error: string | null;
   gpu: string | null;
   model_loaded: boolean;

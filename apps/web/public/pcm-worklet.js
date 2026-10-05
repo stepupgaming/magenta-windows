@@ -4,7 +4,9 @@
 // after the speaker clock (about 0.94x). A fixed queue eventually runs dry,
 // and the dry splice is the click. This keeps a cushion queued (one second by
 // default) and overlap-adds a slightly longer grain so the queue stays full.
-// Pitch stays put. Tempo sits a little under native.
+// Pitch stays put. Tempo sits a little under native. It also keeps the last
+// 50 seconds of the engine's audio that reached the speakers, before the
+// stretch and the effects, so the model can be rewound to a moment it played.
 //
 // tap-processor passes the master bus through untouched. It meters every
 // sample, keeps the last minute for retro capture, and streams a recording.
@@ -18,6 +20,7 @@ const FADE = 256;
 const STATS_EVERY = 4800;
 const MIN_TARGET = 0.25;
 const MAX_TARGET = 3;
+const HISTORY_SECONDS = 50;
 
 function riseWindow(length) {
   const window = new Float32Array(length);
@@ -50,6 +53,12 @@ class PcmProcessor extends AudioWorkletProcessor {
     this.outR = new Float32Array(OUT_CAP);
     this.underruns = 0;
     this.sinceStats = 0;
+    this.historySize = Math.round(sampleRate * HISTORY_SECONDS);
+    this.historyL = new Float32Array(this.historySize);
+    this.historyR = new Float32Array(this.historySize);
+    this.historyHead = 0;
+    this.historyFilled = 0;
+    this.available = 0;
     this.clear();
     this.port.onmessage = (event) => {
       const data = event.data;
@@ -62,11 +71,18 @@ class PcmProcessor extends AudioWorkletProcessor {
         this.target = targetFrames(data.seconds);
       } else if (data.kind === "reset") {
         this.clear();
+      } else if (data.kind === "history") {
+        this.history(data.id, data.seconds, data.ago);
       }
     };
   }
 
   clear() {
+    // Queued audio that never played leaves the history too.
+    const unplayed = Math.min(this.available, this.historyFilled);
+    this.historyHead =
+      (this.historyHead - unplayed + this.historySize) % this.historySize;
+    this.historyFilled -= unplayed;
     this.write = 0;
     this.read = 0;
     this.available = 0;
@@ -90,7 +106,39 @@ class PcmProcessor extends AudioWorkletProcessor {
       this.right[this.write] = incoming[index * 2 + 1];
       this.write = (this.write + 1) % CAPACITY;
       this.available += 1;
+      this.historyL[this.historyHead] = incoming[index * 2];
+      this.historyR[this.historyHead] = incoming[index * 2 + 1];
+      this.historyHead = (this.historyHead + 1) % this.historySize;
+      if (this.historyFilled < this.historySize) {
+        this.historyFilled += 1;
+      }
     }
+  }
+
+  /** Up to `seconds` of played audio, ending `ago` seconds before what is playing now. */
+  history(id, seconds, ago) {
+    const queued = Math.min(this.available, this.historyFilled);
+    const heard = this.historyFilled - queued;
+    const skip = Math.min(heard, Math.max(0, Math.round(sampleRate * ago)));
+    const frames = Math.min(
+      heard - skip,
+      Math.max(0, Math.round(sampleRate * seconds))
+    );
+    const end =
+      (this.historyHead - queued - skip + this.historySize * 2) %
+      this.historySize;
+    const start = (end - frames + this.historySize) % this.historySize;
+    const left = new Float32Array(frames);
+    const right = new Float32Array(frames);
+    for (let index = 0; index < frames; index += 1) {
+      const at = (start + index) % this.historySize;
+      left[index] = this.historyL[at];
+      right[index] = this.historyR[at];
+    }
+    this.port.postMessage({ id, kind: "history", left, right }, [
+      left.buffer,
+      right.buffer,
+    ]);
   }
 
   at(channel, logical) {
