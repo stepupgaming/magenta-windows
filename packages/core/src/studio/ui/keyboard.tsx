@@ -132,7 +132,11 @@ export function Keyboard({ className }: { className?: string }) {
 
   const keyColor = (state: KeyState | undefined, black: boolean): string => {
     if (state === "held") {
-      return "z-20 bg-[#fff4e6] shadow-[0_0_26px_#ff8a1f]";
+      // White keys rise above their white neighbors for the glow, but stay
+      // under the black keys.
+      return black
+        ? "bg-[#fff4e6] shadow-[0_0_26px_#ff8a1f]"
+        : "z-[5] bg-[#fff4e6] shadow-[0_0_26px_#ff8a1f]";
     }
     if (state === "latched") {
       return black
