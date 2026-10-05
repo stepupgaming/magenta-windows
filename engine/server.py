@@ -36,6 +36,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from transformers import AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
+from magenta_win.text_mapper import MapperFormatError, TextMapper
+from magenta_win.text_mapper_file import locate_mapper
+
 ENGINE_ROOT = Path(__file__).resolve().parent
 MODEL_CODE = ENGINE_ROOT / "model_code"
 WEIGHTS_REPO = "magenta-community/magenta-realtime-2"
@@ -54,6 +57,12 @@ DRUM_MODES = {"auto": None, "on": [1], "off": [0]}
 _model: Any = None
 _model_error: str | None = None
 _model_lock = threading.Lock()
+
+# Upstream maps every text embedding toward audio space before blending.
+# Without the mapper, text prompts still work, just less like the official apps.
+_text_mapper: TextMapper | None = None
+_text_mapper_state = "pending"
+_text_mapper_detail = "loads with the model"
 
 # Audio prompts arrive over HTTP as 16 kHz mono float32. They are embedded
 # later on the GPU lane, the same thread that replays the CUDA graph.
@@ -161,9 +170,29 @@ def load_model() -> Any:
         except Exception as exc:
             _model_error = str(exc)
             raise
+        load_text_mapper()
         _model = model
         _model_error = None
         return model
+
+
+def load_text_mapper() -> None:
+    """Load the text mapper. A missing or broken mapper never stops the model."""
+    global _text_mapper, _text_mapper_state, _text_mapper_detail
+    try:
+        found = locate_mapper(
+            Path(os.environ["HUGGINGFACE_HUB_CACHE"]),
+            allow_download=os.environ.get("HF_HUB_OFFLINE") != "1",
+            log=lambda message: print(f"[magenta] {message}", flush=True),
+        )
+        _text_mapper_state, _text_mapper_detail = found.state, found.detail
+        if found.path is not None:
+            _text_mapper = TextMapper.from_file(found.path)
+    except (OSError, MapperFormatError) as exc:
+        _text_mapper, _text_mapper_state, _text_mapper_detail = None, "unavailable", str(exc)
+    except Exception as exc:  # noqa: BLE001 - the model must load even if the mapper cannot.
+        _text_mapper, _text_mapper_state, _text_mapper_detail = None, "unavailable", f"unexpected error: {exc!r}"
+    print(f"[magenta] text mapper {_text_mapper_state}: {_text_mapper_detail}", flush=True)
 
 
 def _as_embedding(value: Any, device: torch.device) -> torch.Tensor:
@@ -340,6 +369,8 @@ class Session:
             raw = self.model.processor.embed((samples, AUDIO_PROMPT_RATE))
         else:
             raw = self.model.processor.embed(key)
+            if _text_mapper is not None:
+                raw = _text_mapper(_as_embedding(raw, torch.device("cpu")))
         embedding = _as_embedding(raw, self.model._dev)
         self.cache[key] = embedding
         return embedding
@@ -488,6 +519,8 @@ def health() -> dict[str, Any]:
         "error": _model_error,
         "gpu": gpu,
         "sample_rate": SAMPLE_RATE,
+        "text_mapper": _text_mapper_state,
+        "text_mapper_detail": _text_mapper_detail,
     }
 
 

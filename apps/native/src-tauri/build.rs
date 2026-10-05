@@ -46,7 +46,7 @@ fn pack_tree<W: Write + io::Seek>(
     let name = name.to_string_lossy();
     if matches!(
       name.as_ref(),
-      ".venv" | "__pycache__" | "outputs" | "logs" | ".git"
+      ".venv" | "__pycache__" | ".pytest_cache" | "tests" | "outputs" | "logs" | ".git"
     ) {
       continue;
     }

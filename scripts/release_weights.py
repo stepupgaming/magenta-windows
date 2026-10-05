@@ -20,6 +20,8 @@ if str(ENGINE) not in sys.path:
     sys.path.insert(0, str(ENGINE))
 
 from magenta_win.cache_path import weight_cache
+from magenta_win import text_mapper_file
+from magenta_win.text_mapper_file import MAPPER_FILE, MAPPER_REPO, fetch_mapper, find_mapper
 
 REPOS = (
     "magenta-community/magenta-realtime-2",
@@ -95,6 +97,20 @@ def split_file(src: Path, out_dir: Path, chunk_bytes: int, counter: list[int]) -
     return {"size": size, "sha256": digest.hexdigest(), "parts": parts}
 
 
+def pack_text_mapper(cache: Path, out_dir: Path, chunk_bytes: int, counter: list[int]) -> dict[str, object] | None:
+    """Pack only the mapper from google/magenta-realtime-2, never the whole repo."""
+    path = find_mapper(cache)
+    if path is None:
+        print("no verified text mapper in the cache; the release goes out without it", flush=True)
+        return None
+    packed = split_file(path, out_dir, chunk_bytes, counter)
+    if packed is None:
+        return None
+    snapshot = path.parents[len(Path(MAPPER_FILE).parts) - 1].name
+    print(f"packed {MAPPER_REPO}/{MAPPER_FILE} ({packed['size']} bytes)", flush=True)
+    return {"repo": MAPPER_REPO, "snapshot": snapshot, "file": MAPPER_FILE, **packed}
+
+
 def pack(cache: Path, out_dir: Path, chunk_bytes: int) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     counter = [0]
@@ -118,6 +134,9 @@ def pack(cache: Path, out_dir: Path, chunk_bytes: int) -> Path:
             print(f"packed {repo}/{path.name} ({packed['size']} bytes)", flush=True)
     if not files:
         raise SystemExit(f"No weight files found under {cache}")
+    mapper = pack_text_mapper(cache, out_dir, chunk_bytes, counter)
+    if mapper is not None:
+        files.append(mapper)
     manifest = {
         "format": 1,
         "files": files,
@@ -125,7 +144,7 @@ def pack(cache: Path, out_dir: Path, chunk_bytes: int) -> Path:
             "Parts are under GitHub's 2 GB asset limit. "
             "The bytes are the public Hugging Face files for "
             + " and ".join(REPOS)
-            + "."
+            + f", plus {MAPPER_FILE} from {MAPPER_REPO}."
         ),
     }
     dest = out_dir / MANIFEST_NAME
@@ -191,6 +210,8 @@ def download_huggingface(cache: Path) -> None:
     for repo in REPOS:
         print(f"downloading {repo}", flush=True)
         snapshot_download(repo, cache_dir=str(cache))
+    if find_mapper(cache) is None:
+        fetch_mapper(cache, log=lambda message: print(message, flush=True))
 
 
 def ensure(cache: Path) -> None:
@@ -217,13 +238,30 @@ def self_test() -> None:
         other.mkdir(parents=True)
         (other / "text_encoder.pt").write_bytes(b"text" * 1000)
         (other / "quantizer.pt").write_bytes(b"q" * 2000)
+        mapper = repo_dir(cache, MAPPER_REPO) / "snapshots" / "gcs-1" / MAPPER_FILE
+        mapper.parent.mkdir(parents=True)
+        mapper.write_bytes(b"mapper" * 50_000)
+        # A full snapshot of the mapper's repo must not ride along.
+        (mapper.parents[2] / "huge.safetensors").write_bytes(b"x" * 1000)
+        # Pin the checksum to the stand-in bytes, since pack only ships a verified mapper.
+        pinned = (text_mapper_file.MAPPER_SIZE, text_mapper_file.MAPPER_SHA256)
+        text_mapper_file.MAPPER_SIZE = mapper.stat().st_size
+        text_mapper_file.MAPPER_SHA256 = hashlib.sha256(mapper.read_bytes()).hexdigest()
         packed = root / "parts"
-        pack(cache, packed, chunk_bytes=1024 * 1024)
+        try:
+            pack(cache, packed, chunk_bytes=1024 * 1024)
+        finally:
+            text_mapper_file.MAPPER_SIZE, text_mapper_file.MAPPER_SHA256 = pinned
         restored = root / "restored"
         unpack(packed / MANIFEST_NAME, packed, restored)
         got = (repo_dir(restored, REPOS[0]) / "snapshots" / "abc" / "model.safetensors").read_bytes()
         if got != payload:
             raise SystemExit("self-test payload mismatch")
+        restored_mapper = repo_dir(restored, MAPPER_REPO) / "snapshots" / "gcs-1" / MAPPER_FILE
+        if restored_mapper.read_bytes() != mapper.read_bytes():
+            raise SystemExit("self-test mapper mismatch")
+        if (restored_mapper.parents[2] / "huge.safetensors").exists():
+            raise SystemExit("self-test packed more than the mapper")
     print("self-test ok", flush=True)
 
 

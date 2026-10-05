@@ -136,7 +136,8 @@ def http_json(port: int, method: str, path: str, timeout: float) -> dict[str, An
 
 
 def print_health(payload: dict[str, Any]) -> None:
-    for key in ("ok", "backend", "model_loaded", "error", "gpu", "sample_rate"):
+    keys = ("ok", "backend", "model_loaded", "error", "gpu", "sample_rate", "text_mapper", "text_mapper_detail")
+    for key in keys:
         if key in payload:
             print(f"{key}: {payload[key]}")
 
