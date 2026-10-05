@@ -18,6 +18,13 @@ const STEER_EVERY = 40;
 const PROGRESSION_FLOOR = 52;
 
 let cutPending = false;
+/** A scene groove to jump back to with the next steer. */
+let groovePending: string | null = null;
+
+/** The engine's name for a scene's remembered groove. */
+export function grooveId(slot: number): string {
+  return `scene-${slot + 1}`;
+}
 
 export function currentSpec(): WireSpec {
   const live = useLive.getState();
@@ -32,11 +39,14 @@ export function currentSpec(): WireSpec {
 export function steerNow(): void {
   if (!isPlaying(useLive.getState().phase)) {
     cutPending = false;
+    groovePending = null;
     return;
   }
   const cut = cutPending;
+  const groove = groovePending;
   cutPending = false;
-  engine.steer(currentSpec(), cut);
+  groovePending = null;
+  engine.steer(currentSpec(), cut, groove);
 }
 
 export function play(): void {
@@ -59,7 +69,7 @@ export function reroll(): void {
   engine.restart(currentSpec());
 }
 
-/** Apply pending seed and choices with a fresh stream. */
+/** Clear the model's memory and start again. */
 export function freshStart(): void {
   engine.restart(currentSpec());
 }
@@ -72,6 +82,9 @@ export function saveScene(slot: number): void {
   scenes[slot] = snapshot(studio);
   studio.patch({ scenes });
   useLive.setState({ activeScene: slot });
+  // While playing, the engine also remembers the groove, so a cut back to
+  // this scene picks up the music where it was.
+  engine.remember(grooveId(slot));
 }
 
 export function clearScene(slot: number): void {
@@ -79,6 +92,7 @@ export function clearScene(slot: number): void {
   const scenes = [...studio.scenes];
   scenes[slot] = null;
   studio.patch({ scenes });
+  engine.forget(grooveId(slot));
   if (useLive.getState().activeScene === slot) {
     useLive.setState({ activeScene: null });
   }
@@ -97,6 +111,8 @@ export function recallScene(slot: number, transition?: "cut" | "morph"): void {
     useLive.setState({ activeScene: slot, morph: null, morphProgress: 0 });
     studio.patch(blendScenes(scene, scene, 1));
     cutPending = true;
+    const id = grooveId(slot);
+    groovePending = useLive.getState().grooves.includes(id) ? id : null;
     steerNow();
     return;
   }

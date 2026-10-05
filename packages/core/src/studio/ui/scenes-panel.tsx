@@ -1,8 +1,8 @@
 "use client";
 
 import { cn } from "@workspace/ui/lib/utils";
-import { Plus } from "lucide-react";
-import { clearScene, recallScene, saveScene } from "../conductor.ts";
+import { AudioWaveform, Plus } from "lucide-react";
+import { clearScene, grooveId, recallScene, saveScene } from "../conductor.ts";
 import { sceneColors } from "../scenes.ts";
 import { useLive, useStudio } from "../store.ts";
 import { Hint, Panel, Segmented } from "./kit.tsx";
@@ -12,6 +12,7 @@ const BEAT_CHOICES = [1, 2, 4, 8, 16, 32];
 function ScenePad({ slot }: { slot: number }) {
   const scene = useStudio((state) => state.scenes[slot] ?? null);
   const active = useLive((state) => state.activeScene === slot);
+  const grooved = useLive((state) => state.grooves.includes(grooveId(slot)));
   const morphing = useLive((state) => state.morph?.slot === slot);
   const progress = useLive((state) =>
     state.morph?.slot === slot ? state.morphProgress : 0
@@ -50,6 +51,12 @@ function ScenePad({ slot }: { slot: number }) {
       <span className="flex items-center justify-between font-mono text-[10px] text-white/55">
         {slot + 1}
         {scene ? null : <Plus className="size-3" />}
+        {scene && grooved ? (
+          <AudioWaveform
+            aria-label="Groove remembered"
+            className="size-3 text-white/70"
+          />
+        ) : null}
       </span>
       <span
         className={cn(
@@ -72,8 +79,8 @@ function ScenePad({ slot }: { slot: number }) {
       keys={`${slot + 1}`}
       label={
         scene
-          ? "Recall. Shift-click to overwrite, Alt-click to cut, right-click to clear."
-          : "Save the current sound here"
+          ? `Recall. Shift-click to overwrite, Alt-click to cut, right-click to clear.${grooved ? " A cut also jumps back to the groove saved with it." : ""}`
+          : "Save the current sound here. While playing, the groove is saved too."
       }
     >
       {pad}
@@ -100,7 +107,7 @@ export function ScenesPanel() {
               value: "morph",
             },
             {
-              hint: "Jump at once, flushing the old style",
+              hint: "Jump at once, flushing the old style, and back to the scene's groove when it has one",
               label: "Cut",
               value: "cut",
             },

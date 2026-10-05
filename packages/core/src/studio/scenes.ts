@@ -2,7 +2,7 @@
 // and the drum mode. Recall either cuts or morphs over a number of beats.
 
 import { audible } from "./spec.ts";
-import type { StudioSettings } from "./store.ts";
+import { MODEL_DEFAULTS, type StudioSettings } from "./store.ts";
 import type { Scene, StylePrompt } from "./types.ts";
 
 type SceneSource = Pick<
@@ -13,9 +13,13 @@ type SceneSource = Pick<
   | "mixMode"
   | "noteStrength"
   | "prompts"
+  | "styleDetail"
   | "styleStrength"
   | "temperature"
 >;
+
+const detail = (scene: Scene) =>
+  scene.styleDetail ?? MODEL_DEFAULTS.styleDetail;
 
 export function sceneName(prompts: StylePrompt[]): string {
   const on = audible(prompts);
@@ -39,6 +43,7 @@ export function snapshot(studio: SceneSource): Scene {
     name: sceneName(studio.prompts),
     noteStrength: studio.noteStrength,
     prompts: studio.prompts.map((prompt) => ({ ...prompt })),
+    styleDetail: studio.styleDetail,
     styleStrength: studio.styleStrength,
     temperature: studio.temperature,
   };
@@ -81,6 +86,7 @@ export function blendScenes(from: Scene, to: Scene, t: number): SceneSource {
       mixMode: to.mixMode,
       noteStrength: to.noteStrength,
       prompts: to.prompts.map((prompt) => ({ ...prompt })),
+      styleDetail: detail(to),
       styleStrength: to.styleStrength,
       temperature: to.temperature,
     };
@@ -125,6 +131,7 @@ export function blendScenes(from: Scene, to: Scene, t: number): SceneSource {
     mixMode: to.mixMode,
     noteStrength: lerp(from.noteStrength, to.noteStrength, t),
     prompts,
+    styleDetail: Math.round(lerp(detail(from), detail(to), t)),
     styleStrength: lerp(from.styleStrength, to.styleStrength, t),
     temperature: lerp(from.temperature, to.temperature, t),
   };

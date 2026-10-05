@@ -3,7 +3,8 @@
 // A stand-in for engine/server.py so the stage can be built and tested
 // without an NVIDIA GPU. Same HTTP routes, same websocket protocol. It plays
 // a simple synth that follows the held notes, the drum mode, and a timbre
-// picked from the prompt text. It is not the model.
+// picked from the prompt text, brighter with more style detail. Remembered
+// grooves restore the synth's clock. It is not the model.
 //
 //   node scripts/mock-engine.mjs            listens on 127.0.0.1:8765
 //   MAGENTA_PORT=9000 node scripts/mock-engine.mjs
@@ -233,7 +234,8 @@ class Voice {
       .join("|");
     const seed = hash(style || "free");
     const harmonics = 1 + (seed % 5);
-    const brightness = 0.25 + ((seed >> 8) % 60) / 100;
+    const detail = Math.min(12, Math.max(1, spec.style_levels ?? 6)) / 12;
+    const brightness = (0.25 + ((seed >> 8) % 60) / 100) * (0.5 + detail);
     const wobble = Math.max(0, (spec.temperature ?? 1) - 0.8) * 0.004;
     const pitches = this.pitches(spec);
     const withDrums = spec.drums !== "off";
@@ -258,6 +260,7 @@ function stream(socket) {
   let spec = {};
   let running = false;
   let timer = null;
+  const grooves = new Map();
   let sent = 0;
   let wall = 0;
   let lastStats = 0;
@@ -315,6 +318,61 @@ function stream(socket) {
     }, 250);
   };
 
+  const copyVoice = (from) =>
+    Object.assign(new Voice(), from, { phases: new Map(from.phases) });
+
+  const remember = (slot) => {
+    if (running) {
+      grooves.set(slot, copyVoice(voice));
+      text({ slot, type: "remembered" });
+    }
+  };
+
+  const recall = (slot) => {
+    const saved = grooves.get(slot);
+    if (saved) {
+      voice = copyVoice(saved);
+    } else {
+      text({ slot, type: "forgotten" });
+    }
+  };
+
+  const handle = (message) => {
+    const slot = typeof message.slot === "string" ? message.slot : null;
+    switch (message.op) {
+      case "stop":
+        running = false;
+        clearTimeout(timer);
+        text({ type: "stopped" });
+        return;
+      case "start":
+      case "restart":
+        spec = message;
+        running = false;
+        clearTimeout(timer);
+        begin();
+        return;
+      case "remember":
+        if (slot) {
+          remember(slot);
+        }
+        return;
+      case "forget":
+        if (slot) {
+          grooves.delete(slot);
+        }
+        return;
+      case "steer":
+        spec = message;
+        if (typeof message.groove === "string") {
+          recall(message.groove);
+        }
+        return;
+      default:
+        return;
+    }
+  };
+
   const onMessage = (opcode, payload) => {
     if (opcode === 0x8) {
       running = false;
@@ -335,22 +393,7 @@ function stream(socket) {
     } catch {
       return;
     }
-    if (message.op === "stop") {
-      running = false;
-      clearTimeout(timer);
-      text({ type: "stopped" });
-      return;
-    }
-    if (message.op === "start" || message.op === "restart") {
-      spec = message;
-      running = false;
-      clearTimeout(timer);
-      begin();
-      return;
-    }
-    if (message.op === "steer") {
-      spec = message;
-    }
+    handle(message);
   };
 
   socket.on("data", (chunk) => {

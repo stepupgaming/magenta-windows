@@ -41,6 +41,7 @@ const settings = {
   ],
   seed: 7,
   strum: true,
+  styleDetail: 6,
   styleStrength: 2.4,
   temperature: 1.05,
   topK: 48,
@@ -154,9 +155,16 @@ describe("buildSpec", () => {
       notes: null,
       onsets: false,
       seed: 7,
+      style_levels: 6,
       temperature: 1.05,
       top_k: 48,
     });
+  });
+
+  it("sends style detail as whole token levels", () => {
+    expect(
+      buildSpec({ ...settings, styleDetail: 9.4 }, inputs).style_levels
+    ).toBe(9);
   });
 
   it("pushes note strength up while solo rests", () => {

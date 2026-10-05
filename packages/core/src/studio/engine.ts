@@ -2,6 +2,7 @@
 // The stage reads everything it shows from the live store this writes.
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import { LiveAudio } from "./audio.ts";
 import { loadClip } from "./clips.ts";
 import type { WireSpec } from "./spec.ts";
@@ -13,8 +14,7 @@ const HEALTH_EVERY = 2000;
 interface StreamMessage {
   message?: string;
   msPerFrame?: number;
-  seed?: number;
-  topK?: number;
+  slot?: string;
   type?: string;
 }
 
@@ -146,28 +146,54 @@ class EngineClient {
     this.lastSent = "";
     const health = useLive.getState().health;
     set({
+      grooves: [],
       phase: health ? "ready" : "offline",
-      runningSeed: null,
-      runningTopK: null,
       status: health?.gpu ?? "Stopped",
     });
   }
 
-  /** Send the spec when it differs from the last one sent. */
-  steer(spec: WireSpec, cut = false): void {
+  /**
+   * Send the spec when it differs from the last one sent. A groove jumps the
+   * model back to a moment it remembered for that slot.
+   */
+  steer(spec: WireSpec, cut = false, groove: string | null = null): void {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return;
     }
     const body = JSON.stringify(spec);
-    if (body === this.lastSent && !cut) {
+    if (body === this.lastSent && !cut && !groove) {
       return;
     }
     this.lastSent = body;
-    socket.send(JSON.stringify({ ...spec, cut, op: "steer" }));
+    socket.send(
+      JSON.stringify({
+        ...spec,
+        cut,
+        op: "steer",
+        ...(groove ? { groove } : {}),
+      })
+    );
   }
 
-  /** Fresh model memory with the spec's seed and choices. Brief gap. */
+  /** Ask the engine to remember the music right now under this slot. */
+  remember(slot: string): void {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    socket.send(JSON.stringify({ op: "remember", slot }));
+  }
+
+  forget(slot: string): void {
+    this.dropGroove(slot);
+    const socket = this.socket;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ op: "forget", slot }));
+    }
+  }
+
+  /** Fresh model memory. Brief gap while the engine primes it again. */
   restart(spec: WireSpec): void {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -231,6 +257,8 @@ class EngineClient {
     const socket = new WebSocket(ENGINE_SOCKET);
     socket.binaryType = "arraybuffer";
     this.socket = socket;
+    // Grooves live in one stream on the engine.
+    set({ grooves: [] });
     socket.onopen = () => {
       this.lastSent = JSON.stringify(first);
       socket.send(JSON.stringify({ ...first, op: "start" }));
@@ -259,7 +287,7 @@ class EngineClient {
       this.socket = null;
       const phase = useLive.getState().phase;
       if (phase !== "error") {
-        set({ phase: "ready", status: "The stream closed" });
+        set({ grooves: [], phase: "ready", status: "The stream closed" });
       }
     };
   }
@@ -274,11 +302,19 @@ class EngineClient {
     if (message.type === "status" && message.message) {
       set({ status: message.message });
     } else if (message.type === "started") {
-      set({
-        phase: "live",
-        runningSeed: message.seed ?? useStudio.getState().seed,
-        runningTopK: message.topK ?? null,
-        status: "Live",
+      set({ phase: "live", status: "Live" });
+    } else if (message.type === "remembered" && message.slot) {
+      const slot = message.slot;
+      const grooves = useLive.getState().grooves;
+      if (!grooves.includes(slot)) {
+        set({ grooves: [...grooves, slot] });
+      }
+    } else if (message.type === "forgotten" && message.slot) {
+      this.dropGroove(message.slot);
+    } else if (message.type === "revived") {
+      toast("The model went quiet, so the engine woke it up", {
+        description:
+          "Held on one style for a long time, the model can fall silent. Changing the style also helps.",
       });
     } else if (
       message.type === "stats" &&
@@ -291,11 +327,18 @@ class EngineClient {
     }
   }
 
+  private dropGroove(slot: string): void {
+    const grooves = useLive.getState().grooves;
+    if (grooves.includes(slot)) {
+      set({ grooves: grooves.filter((item) => item !== slot) });
+    }
+  }
+
   private fail(message: string): void {
     const socket = this.socket;
     this.socket = null;
     socket?.close();
-    set({ phase: "error", status: message });
+    set({ grooves: [], phase: "error", status: message });
   }
 
   private async poll(): Promise<void> {

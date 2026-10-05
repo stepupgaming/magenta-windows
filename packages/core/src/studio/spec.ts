@@ -25,6 +25,8 @@ export interface WireSpec {
   onsets: boolean;
   prompts: WirePrompt[];
   seed: number;
+  /** Style tokens that steer, coarsest first, 1 to 12. */
+  style_levels: number;
   temperature: number;
   top_k: number;
 }
@@ -136,6 +138,7 @@ type SpecSettings = Pick<
   | "prompts"
   | "seed"
   | "strum"
+  | "styleDetail"
   | "styleStrength"
   | "temperature"
   | "topK"
@@ -203,6 +206,7 @@ export function buildSpec(studio: SpecSettings, inputs: SpecInputs): WireSpec {
     onsets: !studio.strum,
     prompts,
     seed: studio.seed,
+    style_levels: Math.round(studio.styleDetail),
     temperature: round(chaosTemperature(studio.temperature, inputs.chaos), 3),
     top_k: Math.round(studio.topK),
   };

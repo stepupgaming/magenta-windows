@@ -74,6 +74,8 @@ export interface Scene extends ModelKnobs {
   mixMode: MixMode;
   name: string;
   prompts: StylePrompt[];
+  /** Missing from scenes saved before style detail existed. */
+  styleDetail?: number;
 }
 
 export interface FxState {

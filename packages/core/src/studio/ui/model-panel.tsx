@@ -1,6 +1,5 @@
 "use client";
 
-import { cn } from "@workspace/ui/lib/utils";
 import { Dices, RotateCcw } from "lucide-react";
 import { freshStart, reroll } from "../conductor.ts";
 import { isPlaying, useLive, useStudio } from "../store.ts";
@@ -16,13 +15,7 @@ export function ModelPanel() {
   const patch = useStudio((state) => state.patch);
   const styleStrength = useStudio((state) => state.styleStrength);
   const phase = useLive((state) => state.phase);
-  const runningTopK = useLive((state) => state.runningTopK);
-  const runningSeed = useLive((state) => state.runningSeed);
   const playing = isPlaying(phase);
-  const pending =
-    playing &&
-    ((runningTopK !== null && runningTopK !== topK) ||
-      (runningSeed !== null && runningSeed !== seed));
   const kIndex = Math.max(
     0,
     TOP_K_STEPS.findIndex((value) => value >= topK)
@@ -30,7 +23,7 @@ export function ModelPanel() {
 
   return (
     <Panel className="shrink-0" label="Model">
-      <div className="grid grid-cols-4 justify-items-center px-2 pb-3">
+      <div className="grid grid-cols-5 justify-items-center px-1 pb-3">
         <Knob
           color="#ff4c8d"
           hint={
@@ -40,6 +33,12 @@ export function ModelPanel() {
           }
           label="Style"
           paramId="model.style"
+        />
+        <Knob
+          color="#ff6fa6"
+          hint="How many of the 12 style tokens steer, coarsest first. Google's apps use 6. More follows each prompt more exactly."
+          label="Style detail"
+          paramId="model.detail"
         />
         <Knob
           color="#ff8a1f"
@@ -88,7 +87,7 @@ export function ModelPanel() {
         </div>
       </div>
       <div className="flex items-center gap-2 border-white/[0.05] border-t px-4 py-2.5">
-        <Hint label="How many candidates the model picks from at each step (top-k). Applies on a restart.">
+        <Hint label="How many candidates the model picks from at each step (top-k)">
           <label className="flex min-w-0 flex-1 items-center gap-2 text-white/55 text-xs">
             Choices
             <input
@@ -108,7 +107,7 @@ export function ModelPanel() {
             </span>
           </label>
         </Hint>
-        <Hint label="Seed for the next restart">
+        <Hint label="The sampler's seed. Re-roll picks a new one.">
           <span className="font-mono text-[11px] text-white/45 tabular-nums">
             #{seed}
           </span>
@@ -127,18 +126,13 @@ export function ModelPanel() {
         <Hint label="Clear the model's memory of the last 20 seconds and start again">
           <button
             aria-label="Fresh start"
-            className={cn(
-              "flex h-7 items-center gap-1 rounded-full px-2.5 font-medium text-[11px] transition-colors disabled:opacity-30",
-              pending
-                ? "bg-amber-300 text-black"
-                : "text-white/60 hover:bg-white/[0.07] hover:text-white"
-            )}
+            className="flex h-7 items-center gap-1 rounded-full px-2.5 font-medium text-[11px] text-white/60 transition-colors hover:bg-white/[0.07] hover:text-white disabled:opacity-30"
             disabled={!playing}
             onClick={freshStart}
             type="button"
           >
             <RotateCcw className="size-3" />
-            {pending ? "Apply" : "Fresh"}
+            Fresh
           </button>
         </Hint>
       </div>

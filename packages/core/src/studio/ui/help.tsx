@@ -39,6 +39,10 @@ const IDEAS: [string, string][] = [
     "Place prompts in a field and move the listener. Pull falls off with the square of the distance, like the Collider demo. Fling prompts or let the listener orbit for music that keeps evolving.",
   ],
   [
+    "Style detail",
+    "A blended style reaches the model as 12 tokens, from broad to fine. Google's apps let only the 6 broadest steer. Turn Style detail up to follow each prompt more exactly, or down for a looser reading.",
+  ],
+  [
     "Notes",
     "In Jam the model plays around the notes you hold and adds its own. In Solo it plays only your notes and stays quiet between them. Strum lets held notes re-strike. Clearance keeps the model away from the semitones next to yours.",
   ],
@@ -49,6 +53,10 @@ const IDEAS: [string, string][] = [
   [
     "Temperature and Chaos",
     "Temperature is how adventurous each 40 ms step is. Chaos is a spring: push it for a moment and it returns to center. The pitch wheel on a MIDI keyboard moves it too.",
+  ],
+  [
+    "Scenes",
+    "A scene saves the sound: prompts, positions, and knobs. Morph glides there over a number of beats. Cut jumps at once, and a scene saved while playing also takes the model back to the groove it was in. With the same notes and knobs, it plays out the same way each time.",
   ],
   [
     "Timing",

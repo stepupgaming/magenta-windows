@@ -43,6 +43,7 @@ function studioParam(
   key:
     | "drumStrength"
     | "noteStrength"
+    | "styleDetail"
     | "styleStrength"
     | "temperature"
     | "volume",
@@ -121,6 +122,14 @@ export const PARAMS: ParamDef[] = [
     "styleStrength",
     { defaultValue: MODEL_DEFAULTS.styleStrength, max: 5, min: 0, step: 0.2 },
     fixed(1)
+  ),
+  studioParam(
+    "model.detail",
+    "Style detail",
+    "Model",
+    "styleDetail",
+    { defaultValue: MODEL_DEFAULTS.styleDetail, max: 12, min: 1, step: 1 },
+    (value) => `${Math.round(value)} of 12`
   ),
   studioParam(
     "model.notes",

@@ -27,6 +27,8 @@ export const MODEL_DEFAULTS = {
   drumStrength: 1,
   noteStrength: 0.8,
   seed: 7,
+  /** Style tokens that steer, coarsest first. Google's apps use 6 of 12. */
+  styleDetail: 6,
   styleStrength: 2.4,
   temperature: 1.05,
   topK: 48,
@@ -173,6 +175,8 @@ export interface StudioSettings {
   scenes: (Scene | null)[];
   seed: number;
   strum: boolean;
+  /** How many of the 12 style tokens steer, coarsest first. */
+  styleDetail: number;
   styleStrength: number;
   temperature: number;
   topK: number;
@@ -210,6 +214,7 @@ export const STUDIO_DEFAULTS: StudioSettings = {
   scenes: Array.from({ length: SCENE_SLOTS }, () => null),
   seed: MODEL_DEFAULTS.seed,
   strum: true,
+  styleDetail: MODEL_DEFAULTS.styleDetail,
   styleStrength: MODEL_DEFAULTS.styleStrength,
   temperature: MODEL_DEFAULTS.temperature,
   topK: MODEL_DEFAULTS.topK,
@@ -347,6 +352,8 @@ export interface LiveState {
   audition: string | null;
   bootstrap: string;
   chaos: number;
+  /** Scene grooves the engine remembers in this stream, by slot name. */
+  grooves: string[];
   health: EngineHealth | null;
   keyNotes: number[];
   latched: number[];
@@ -364,8 +371,6 @@ export interface LiveState {
   progressionNotes: number[];
   progressionRunning: boolean;
   recording: number | null;
-  runningSeed: number | null;
-  runningTopK: number | null;
   stats: EngineStats;
   status: string;
   sustain: boolean;
@@ -378,6 +383,7 @@ export const useLive = create<LiveState>()(() => ({
   audition: null,
   bootstrap: "",
   chaos: 0,
+  grooves: [],
   health: null,
   keyNotes: [],
   latched: [],
@@ -395,8 +401,6 @@ export const useLive = create<LiveState>()(() => ({
   progressionNotes: [],
   progressionRunning: false,
   recording: null,
-  runningSeed: null,
-  runningTopK: null,
   stats: { msPerFrame: null, queued: 0, ratio: 1, underruns: 0 },
   status: "Looking for the engine",
   sustain: false,
