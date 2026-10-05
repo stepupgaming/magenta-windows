@@ -487,6 +487,11 @@ class GpuLane:
         self._thread.start()
 
     def _loop(self) -> None:
+        # Nothing on this thread trains. With autograd on, every steer's
+        # encoder pass stays chained to the CUDA graph's static source
+        # buffer, and VRAM grows until the stream stops. Grad mode is per
+        # thread, so this covers every job the lane runs.
+        torch.set_grad_enabled(False)
         while True:
             fn, args, done = self._jobs.get()
             try:
