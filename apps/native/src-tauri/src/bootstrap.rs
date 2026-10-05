@@ -132,7 +132,7 @@ fn fetch_weights(
   if !script.is_file() {
     return Ok(());
   }
-  set_status("Downloading the checkpoint. About 10 GB, first launch only.");
+  set_status("Checking for the checkpoint. Only a first launch downloads it, about 10 GB.");
   let python = venv_python(root);
   let log = root.join("engine").join("logs").join("weights.log");
   run(
