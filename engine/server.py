@@ -985,6 +985,7 @@ async def stream_ws(websocket: WebSocket) -> None:
             await asyncio.to_thread(lane.call, session.close)
 
 
+@torch.no_grad()
 def render(
     spec: dict[str, Any],
     seconds: float,
@@ -995,7 +996,10 @@ def render(
     """Write `seconds` of music to a wav. With `continue_clip` (48 kHz stereo),
     the music continues that clip, and the wav starts with up to `lead_in`
     seconds of the clip before the point where the model picks up, as the codec
-    decodes them, so the join has no seam."""
+    decodes them, so the join has no seam.
+
+    magenta generate calls this outside the GPU lane, so autograd is turned off
+    here too. Otherwise the codec's weights make its audio require grad."""
     import soundfile as sf
 
     spec = clean_spec(spec)

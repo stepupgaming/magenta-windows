@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -269,3 +270,25 @@ def test_health_reports_engine_memory_once_cuda_runs(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(cuda, "memory_allocated", lambda: 5 * 2**30)
     monkeypatch.setattr(cuda, "memory_reserved", lambda: 6 * 2**30)
     assert server.cuda_memory() == {"allocated_mb": 5120, "reserved_mb": 6144}
+
+
+def test_generate_continues_a_clip_with_autograd_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """magenta generate renders outside the GPU lane. The real codec has
+    parameters, so with autograd on its audio required grad and continuing a
+    clip failed on .numpy()."""
+    pytest.importorskip("soundfile")
+    model = TinyModel()
+    codec_scale = torch.nn.Parameter(torch.ones(()))
+    decode = model.decode_stream
+
+    def codec_with_weights(frames: torch.Tensor, state: dict[str, Any]) -> torch.Tensor:
+        return decode(frames, state) * codec_scale
+
+    model.decode_stream = codec_with_weights  # type: ignore[method-assign]
+    monkeypatch.setattr(server, "load_model", lambda: model)
+    monkeypatch.setattr(server, "_clip_encoder", FakeClipEncoder())
+    monkeypatch.setattr(server.torch.cuda, "synchronize", lambda: None)
+    out = tmp_path / "continued.wav"
+    server.render(spec(), 0.5, out, continue_clip=clip(10), lead_in=1.0)
+    assert out.is_file()
+    assert torch.is_grad_enabled()
