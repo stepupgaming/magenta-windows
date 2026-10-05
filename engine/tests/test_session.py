@@ -256,3 +256,16 @@ def test_clip_store_checks_what_it_keeps() -> None:
     for bad in (b"123", clip(1).tobytes(), np.full((48_000 * 5, 2), np.nan, np.float32).tobytes()):
         with pytest.raises(ValueError):
             server.store_clip(bad)
+
+
+def test_health_reports_engine_memory_once_cuda_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    cuda = server.torch.cuda
+    monkeypatch.setattr(cuda, "is_available", lambda: True)
+    monkeypatch.setattr(cuda, "is_initialized", lambda: False)
+    # An idle engine must not start CUDA just to answer /health.
+    monkeypatch.setattr(cuda, "memory_allocated", lambda: pytest.fail("started CUDA"))
+    assert server.cuda_memory() is None
+    monkeypatch.setattr(cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(cuda, "memory_allocated", lambda: 5 * 2**30)
+    monkeypatch.setattr(cuda, "memory_reserved", lambda: 6 * 2**30)
+    assert server.cuda_memory() == {"allocated_mb": 5120, "reserved_mb": 6144}

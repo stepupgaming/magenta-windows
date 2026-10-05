@@ -5,10 +5,12 @@
 3. Live: the engine the window uses streams for 10 minutes while this script
    moves three style faders four times a second, changes choices and seed,
    plays chords, saves and recalls a groove, continues from the stream, and
-   restarts once. GPU memory is sampled every 10 seconds.
+   restarts once. Every 10 seconds it reads the engine's own GPU memory from
+   /health and the whole GPU's from nvidia-smi.
 
 gpu-check.bat runs this with engine\\.venv. Everything lands in
-engine/logs/gpu-check/<time>/, with report.txt as the summary.
+engine/logs/gpu-check/<time>/, with report.txt as the summary and
+3-timeline.txt listing every action and engine event of the live stream.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ import wave
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import numpy as np
@@ -42,8 +44,14 @@ BASE_URL = f"http://127.0.0.1:{PORT}"
 RATE = 48_000
 REALTIME_FRAME_MS = 40.0  # one model frame is 40 ms of audio
 OLD_SPEED = 0.94  # what the base model managed before the speed work
-GROWTH_LIMIT_MB = 300
-SLOPE_LIMIT_MB_PER_MIN = 20
+# A leak grows with every steer, about 2,400 of them here, so it shows as
+# hundreds of MB. One-time buffers from a continue or a restart do not.
+ENGINE_GROWTH_LIMIT_MB = 200
+GPU_GROWTH_LIMIT_MB = 500
+# The Windows desktop alone holds about 1 GB. More than this is other programs.
+BUSY_MB = 3000
+SETTLED_AFTER = 180  # the first continue, at 2:30, fills the clip encoder's buffers once
+CAUSE_WINDOW = 15  # the watchdog waits 6 s, so look this far back for what came first
 SILENT_RMS = 1e-4
 KEEP_SECONDS = 30
 CLIP_SECONDS = 12
@@ -54,6 +62,7 @@ SPEED = re.compile(r"speed=([\d.]+)x")
 FADERS = (("techno", 7.0, 0.0), ("dusty boom bap", 11.0, 2.1), ("ambient pads", 13.0, 4.2))
 CHORD = (60, 64, 67)
 CHOICES = (20, 48, 120)
+OUT_OF_MEMORY = ("OutOfMemoryError", "CUDA out of memory")
 
 
 def say(text: str = "") -> None:
@@ -94,12 +103,12 @@ def find_nvidia_smi() -> str | None:
     return None
 
 
-def query_gpus(smi: str | None, fields: str) -> list[list[str]]:
+def run_smi(smi: str | None, query: str) -> list[list[str]]:
     if smi is None:
         return []
     try:
         out = subprocess.run(
-            [smi, f"--query-gpu={fields}", "--format=csv,noheader,nounits"],
+            [smi, query, "--format=csv,noheader,nounits"],
             capture_output=True,
             text=True,
             timeout=20,
@@ -112,13 +121,29 @@ def query_gpus(smi: str | None, fields: str) -> list[list[str]]:
     return [[part.strip() for part in line.split(",")] for line in out.stdout.strip().splitlines() if line.strip()]
 
 
+def query_gpus(smi: str | None, fields: str) -> list[list[str]]:
+    return run_smi(smi, f"--query-gpu={fields}")
+
+
 def gpu_used_mb(smi: str | None) -> int | None:
-    """Memory in use across every NVIDIA GPU, which is what Task Manager adds up."""
+    """Memory in use across every NVIDIA GPU, by every program."""
     rows = query_gpus(smi, "memory.used")
     try:
         return sum(int(float(row[0])) for row in rows) if rows else None
     except ValueError:
         return None
+
+
+def gpu_programs(smi: str | None) -> list[str]:
+    """Programs using CUDA. Windows reports their memory as N/A, and games or
+    browsers holding graphics memory are not listed at all."""
+    programs = []
+    for row in run_smi(smi, "--query-compute-apps=pid,process_name,used_memory"):
+        if len(row) < 2:
+            continue
+        memory = f", {row[2]} MB" if len(row) > 2 and row[2].isdigit() else ""
+        programs.append(f"{PureWindowsPath(row[1]).name} (pid {row[0]}{memory})")
+    return programs
 
 
 def slope_mb_per_min(samples: list[tuple[float, int]]) -> float:
@@ -127,6 +152,18 @@ def slope_mb_per_min(samples: list[tuple[float, int]]) -> float:
     times = np.array([t for t, _ in samples]) / 60.0
     values = np.array([mb for _, mb in samples], dtype=np.float64)
     return float(np.polyfit(times, values, 1)[0])
+
+
+def settled(samples: list[tuple[float, int]]) -> list[tuple[float, int]]:
+    return [(t, mb) for t, mb in samples if t >= SETTLED_AFTER] or samples
+
+
+def net_growth(samples: list[tuple[float, int]]) -> tuple[int, int, int]:
+    """Median of the first three samples, of the last three, and the change, so
+    a single noisy sample at either end cannot decide the verdict."""
+    first = int(np.median([mb for _, mb in samples[:3]]))
+    last = int(np.median([mb for _, mb in samples[-3:]]))
+    return first, last, last - first
 
 
 # --- Steps 1 and 2: magenta generate ----------------------------------------
@@ -139,6 +176,10 @@ class Render:
     frames_ms: list[float]
     wall: float
     tail: list[str]
+
+    @property
+    def out_of_memory(self) -> bool:
+        return any(marker in line for line in self.tail for marker in OUT_OF_MEMORY)
 
 
 def run_generate(label: str, command: list[str], log_path: Path) -> Render:
@@ -190,6 +231,19 @@ def frame_summary(frames: list[float]) -> str:
     )
 
 
+def generate_lines(step: str, render: Render, busy_mb: int | None) -> list[str]:
+    if render.ok and render.speed is not None:
+        pace = "faster than real time" if render.speed >= 1.0 else "slower than real time"
+        return [
+            f"{step}: {render.speed:.2f}x, {pace} (it was about {OLD_SPEED:.2f}x before the speed work).",
+            f"   {frame_summary(render.frames_ms)}.",
+        ]
+    if render.out_of_memory:
+        held = f" Other programs held {busy_mb:,} MB of the GPU when the check began." if busy_mb else ""
+        return [f"{step}: FAILED, out of GPU memory.{held} The end of its log:", *[f"   | {line}" for line in render.tail[-4:]]]
+    return [f"{step}: FAILED. The end of its log:", *[f"   | {line}" for line in render.tail[-15:]]]
+
+
 # --- Step 3: the live stream ------------------------------------------------
 
 
@@ -207,13 +261,34 @@ class Live:
     restarts: int = 0
     started: int = 0
     revived: int = 0
-    silent_seconds: int = 0
+    silent_at: list[float] = field(default_factory=list)
     frame_ms: list[float] = field(default_factory=list)
     rates: list[float] = field(default_factory=list)
-    memory: list[tuple[float, int]] = field(default_factory=list)
+    engine_allocated: list[tuple[float, int]] = field(default_factory=list)
+    engine_reserved: list[tuple[float, int]] = field(default_factory=list)
+    gpu_memory: list[tuple[float, int]] = field(default_factory=list)
+    actions: list[tuple[float, str]] = field(default_factory=list)
+    timeline: list[tuple[float, str]] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     health: dict[str, Any] = field(default_factory=dict)
+    begin: float | None = None
     finished: bool = False
+
+    def now(self) -> float:
+        return 0.0 if self.begin is None else time.perf_counter() - self.begin
+
+    def act(self, what: str) -> None:
+        self.actions.append((self.now(), what))
+        self.timeline.append((self.now(), what))
+
+    def problem(self, what: str) -> None:
+        t = self.now()
+        cause = next(
+            (f" ({t - at:.0f} s after: {action})" for at, action in reversed(self.actions) if t - at <= CAUSE_WINDOW),
+            "",
+        )
+        self.problems.append(f"{clock(t)} {what}{cause}")
+        self.timeline.append((t, f"ENGINE: {what}"))
 
 
 def http_json(path: str, data: bytes | None = None, timeout: float = 30) -> dict[str, Any]:
@@ -235,7 +310,7 @@ def fader_weights(t: float) -> list[dict[str, Any]]:
 
 
 class Tape:
-    """The last KEEP_SECONDS of the stream, plus a silence count per second."""
+    """The last KEEP_SECONDS of the stream, and when it went silent."""
 
     def __init__(self) -> None:
         self.chunks: deque[np.ndarray] = deque()
@@ -253,7 +328,8 @@ class Tape:
         if self.pending_frames >= RATE:
             second = np.concatenate(self.pending).astype(np.float32) / 32767.0
             if float(np.sqrt(np.mean(np.square(second)))) < SILENT_RMS:
-                live.silent_seconds += 1
+                live.silent_at.append(live.now())
+                live.timeline.append((live.now(), "ENGINE: a second of digital silence"))
             self.pending, self.pending_frames = [], 0
 
     def last(self, seconds: float) -> np.ndarray:
@@ -269,6 +345,54 @@ def write_wav(path: Path, pcm: np.ndarray) -> None:
         out.setsampwidth(2)
         out.setframerate(RATE)
         out.writeframes(pcm.astype("<i2").tobytes())
+
+
+def handle_event(event: dict[str, Any], live: Live, started: asyncio.Event, stopped: asyncio.Event, failed: asyncio.Event) -> None:
+    kind = event.get("type")
+    if kind == "status":
+        say(f"    engine: {event.get('message')}")
+    elif kind == "started":
+        live.started += 1
+        live.timeline.append((live.now(), "ENGINE: started"))
+        started.set()
+    elif kind == "stats":
+        live.frame_ms.append(float(event.get("msPerFrame", 0.0)))
+    elif kind == "continued":
+        live.continued += 1
+        live.timeline.append((live.now(), f"ENGINE: continued, picking up {event.get('pickup')} s before the clip's end"))
+    elif kind == "continue-failed":
+        live.problem(f"continue failed: {event.get('message')}")
+    elif kind == "forgotten":
+        live.problem(f"groove {event.get('slot')} was forgotten")
+    elif kind == "remembered":
+        live.timeline.append((live.now(), f"ENGINE: remembered {event.get('slot')}"))
+    elif kind == "revived":
+        live.revived += 1
+        live.problem("the model fell silent and the watchdog revived it")
+    elif kind == "error":
+        live.problem(f"engine error: {event.get('message')}")
+        failed.set()
+    elif kind == "stopped":
+        stopped.set()
+
+
+async def sample_memory(live: Live, smi: str | None, t: float) -> tuple[str, str]:
+    engine = "engine memory unknown"
+    try:
+        health = await asyncio.to_thread(http_json, "/health", None, 5)
+    except (OSError, urllib.error.URLError, ValueError):
+        health = {}
+    memory = health.get("cuda_memory")
+    if isinstance(memory, dict):
+        live.engine_allocated.append((t, int(memory["allocated_mb"])))
+        live.engine_reserved.append((t, int(memory["reserved_mb"])))
+        engine = f"engine {memory['allocated_mb']:,} MB"
+    used = await asyncio.to_thread(gpu_used_mb, smi)
+    whole = "GPU unknown"
+    if used is not None:
+        live.gpu_memory.append((t, used))
+        whole = f"GPU {used:,} MB"
+    return engine, whole
 
 
 async def live_stream(minutes: float, smi: str | None, out_dir: Path) -> Live:
@@ -297,30 +421,8 @@ async def live_stream(minutes: float, smi: str | None, out_dir: Path) -> Live:
                     pcm = np.frombuffer(message, "<i2").reshape(-1, 2)
                     live.audio_seconds += pcm.shape[0] / RATE
                     tape.add(pcm, live)
-                    continue
-                event = json.loads(message)
-                kind = event.get("type")
-                if kind == "status":
-                    say(f"    engine: {event.get('message')}")
-                elif kind == "started":
-                    live.started += 1
-                    started.set()
-                elif kind == "stats":
-                    live.frame_ms.append(float(event.get("msPerFrame", 0.0)))
-                elif kind == "continued":
-                    live.continued += 1
-                elif kind == "continue-failed":
-                    live.problems.append(f"continue failed: {event.get('message')}")
-                elif kind == "forgotten":
-                    live.problems.append(f"groove {event.get('slot')} was forgotten")
-                elif kind == "revived":
-                    live.revived += 1
-                    live.problems.append("the model fell silent and the watchdog revived it")
-                elif kind == "error":
-                    live.problems.append(f"engine error: {event.get('message')}")
-                    failed.set()
-                elif kind == "stopped":
-                    stopped.set()
+                else:
+                    handle_event(json.loads(message), live, started, stopped, failed)
 
         receiver = asyncio.create_task(receive())
         await ws.send(json.dumps({"op": "start", **spec}))
@@ -337,12 +439,12 @@ async def live_stream(minutes: float, smi: str | None, out_dir: Path) -> Live:
             live.problems.append(f"/health failed: {exc}")
 
         duration = minutes * 60.0
-        begin = time.perf_counter()
+        live.begin = time.perf_counter()
         last_second = -1
         last_audio = 0.0
         tick = 1.0 / STEERS_PER_SECOND
         while True:
-            t = time.perf_counter() - begin
+            t = live.now()
             if t >= duration or receiver.done():
                 break
             extra: dict[str, Any] = {}
@@ -354,19 +456,24 @@ async def live_stream(minutes: float, smi: str | None, out_dir: Path) -> Live:
                     spec["top_k"] = CHOICES[(second // 30) % len(CHOICES)]
                     spec["seed"] += 1
                     live.choice_changes += 1
+                    live.act(f"choices {spec['top_k']}, seed {spec['seed']}")
                 if second % 20 == 10:
                     spec["notes"] = [3 if pitch in CHORD else 0 for pitch in range(128)]
                     spec["onsets"] = True
                     live.chords += 1
+                    live.act("chord on")
                 elif second % 20 == 15:
                     spec.pop("notes", None)
                     spec.pop("onsets", None)
+                    live.act("chord off")
                 if second % 120 == 45:
                     await ws.send(json.dumps({"op": "remember", "slot": "scene-1"}))
                     live.grooves_saved += 1
+                    live.act("save groove scene-1")
                 elif second >= 75 and second % 60 == 15:
                     extra = {"groove": "scene-1", "cut": True}
                     live.groove_recalls += 1
+                    live.act("recall groove scene-1 with a cut")
                 if second in (150, 450):
                     clip = tape.last(CLIP_SECONDS)
                     if clip.shape[0] >= 5 * RATE:
@@ -374,23 +481,23 @@ async def live_stream(minutes: float, smi: str | None, out_dir: Path) -> Live:
                         try:
                             stored = await asyncio.to_thread(http_json, "/clip", body)
                         except (OSError, urllib.error.URLError, ValueError) as exc:
-                            live.problems.append(f"uploading a clip failed: {exc}")
+                            live.problem(f"uploading a clip failed: {exc}")
                         else:
                             extra = {"continue": stored["id"], "lead": 2}
                             live.continues_sent += 1
+                            live.act(f"continue from the stream's last {CLIP_SECONDS} s")
                 if second == 300:
                     op = "restart"
                     live.restarts += 1
+                    live.act("restart")
                 if second % 10 == 0 and second:
-                    used = await asyncio.to_thread(gpu_used_mb, smi)
-                    if used is not None:
-                        live.memory.append((t, used))
+                    engine, whole = await sample_memory(live, smi, t)
                     rate = (live.audio_seconds - last_audio) / 10.0
                     last_audio = live.audio_seconds
                     live.rates.append(rate)
                     frame = f"{live.frame_ms[-1]:.1f} ms per frame" if live.frame_ms else "no frame times yet"
-                    memory = f"{used:,} MB used on the GPU" if used is not None else "GPU memory unknown"
-                    say(f"    [{clock(t)} / {clock(duration)}]  {memory}  |  engine {frame}  |  {live.steers} steers")
+                    live.timeline.append((t, f"memory: {engine}, {whole}; {frame}"))
+                    say(f"    [{clock(t)} / {clock(duration)}]  {engine}  |  {whole}  |  {frame}  |  {live.steers} steers")
             spec["prompts"] = fader_weights(t)
             await ws.send(json.dumps({"op": op, **spec, **extra}))
             live.steers += 1
@@ -398,16 +505,18 @@ async def live_stream(minutes: float, smi: str | None, out_dir: Path) -> Live:
 
         if receiver.done():
             reason = receiver.exception() or "the engine closed it"
-            live.problems.append(f"the stream closed early: {reason}")
+            live.problem(f"the stream closed early: {reason}")
         else:
             await ws.send(json.dumps({"op": "stop"}))
             try:
                 await asyncio.wait_for(stopped.wait(), timeout=10)
             except asyncio.TimeoutError:
-                live.problems.append("the engine did not confirm the stop")
-            live.finished = time.perf_counter() - begin >= duration
+                live.problem("the engine did not confirm the stop")
+            live.finished = live.now() >= duration
         receiver.cancel()
     write_wav(out_dir / "live-last-30s.wav", tape.last(KEEP_SECONDS))
+    timeline = "\n".join(f"{clock(t)}  {what}" for t, what in sorted(live.timeline, key=lambda item: item[0]))
+    (out_dir / "3-timeline.txt").write_text(timeline + "\n", encoding="utf-8")
     return live
 
 
@@ -458,36 +567,39 @@ def kill_tree(proc: subprocess.Popen[bytes]) -> None:
 # --- Report -----------------------------------------------------------------
 
 
-def speed_line(render: Render) -> str:
-    if not render.ok or render.speed is None:
-        return "FAILED. The end of its log is below."
-    pace = "faster than real time" if render.speed >= 1.0 else "slower than real time"
-    return f"{render.speed:.2f}x, {pace} (it was about {OLD_SPEED:.2f}x before the speed work)."
-
-
 def memory_lines(live: Live, idle_mb: int | None) -> list[str]:
-    if not live.memory:
-        return ["   GPU memory: not measured (nvidia-smi was not found)."]
-    # The first continue (at 2:30) fills the clip encoder's buffers once, so
-    # measure from 3:00 on.
-    settled = [(t, mb) for t, mb in live.memory if t >= 180] or live.memory
-    base_t, base = settled[0]
-    end = live.memory[-1][1]
-    peak = max(mb for _, mb in live.memory)
-    recent = [(t, mb) for t, mb in live.memory if t >= live.memory[-1][0] - 240]
-    slope = slope_mb_per_min(recent)
-    steady = end - base < GROWTH_LIMIT_MB and slope < SLOPE_LIMIT_MB_PER_MIN
-    verdict = "STEADY" if steady else "GROWING"
-    lines = [
-        (
-            f"   GPU memory: {verdict}. {base:,} MB at {clock(base_t)}, {end:,} MB at the end "
-            f"({end - base:+,} MB), {peak:,} MB at most, {slope:+.1f} MB per minute over the last 4 minutes."
-        ),
-    ]
+    lines: list[str] = []
+    steady: bool | None = None
+    if live.engine_allocated:
+        allocated = settled(live.engine_allocated)
+        reserved = settled(live.engine_reserved)
+        a0, a1, grew = net_growth(allocated)
+        r0, r1, kept = net_growth(reserved)
+        steady = grew < ENGINE_GROWTH_LIMIT_MB
+        lines.append(
+            f"   Engine GPU memory: {'STEADY' if steady else 'GROWING'}. Its tensors held {a0:,} MB at "
+            f"{clock(allocated[0][0])} and {a1:,} MB at the end ({grew:+,} MB). PyTorch kept {r0:,} MB, then "
+            f"{r1:,} MB ({kept:+,} MB), {max(mb for _, mb in live.engine_reserved):,} MB at most."
+        )
+    if live.gpu_memory:
+        whole = settled(live.gpu_memory)
+        g0, g1, change = net_growth(whole)
+        recent = [(t, mb) for t, mb in live.gpu_memory if t >= live.gpu_memory[-1][0] - 240]
+        label = "   Whole GPU, every program"
+        if steady is None:
+            steady = change < GPU_GROWTH_LIMIT_MB
+            label = f"   GPU memory (whole GPU, since this engine does not report its own): {'STEADY' if steady else 'GROWING'}"
+        lines.append(
+            f"{label}: {g0:,} MB at {clock(whole[0][0])}, {g1:,} MB at the end ({change:+,} MB), "
+            f"{max(mb for _, mb in live.gpu_memory):,} MB at most, {slope_mb_per_min(recent):+.0f} MB per minute "
+            "over the last 4 minutes."
+        )
     if idle_mb is not None:
-        lines.append(f"   Before the engine started, the GPU had {idle_mb:,} MB in use by other programs.")
+        lines.append(f"   Before the engine started, other programs held {idle_mb:,} MB of the GPU.")
+    if steady is None:
+        return ["   GPU memory: not measured (no /health memory and no nvidia-smi)."]
     if not steady:
-        lines.append("   Memory that keeps climbing is a leak. Send me this report and 3-server.log.")
+        lines.append("   Memory that keeps climbing is a leak. Send me this report, 3-timeline.txt and 3-server.log.")
     return lines
 
 
@@ -496,33 +608,60 @@ def live_lines(live: Live | None, error: str | None, idle_mb: int | None) -> lis
         return [f"3. Live stream: FAILED. {error}"]
     rates = live.rates[1:] or live.rates
     rate = float(np.median(rates)) if rates else 0.0
-    keeps_up = "keeps up with real time" if rate >= 0.98 else "falls behind real time"
     frames = np.array(live.frame_ms) if live.frame_ms else np.array([0.0])
+    typical = float(np.median(frames))
+    speed = REALTIME_FRAME_MS / typical if typical > 0 else 0.0
     health = live.health
+    silent = ", ".join(clock(t) for t in live.silent_at[:8]) + (" ..." if len(live.silent_at) > 8 else "")
     lines = [
         f"3. Live stream for {live.minutes:g} min: {'finished' if live.finished else 'STOPPED EARLY'}.",
         (
             f"   Steering: {live.steers:,} fader moves, {live.choice_changes} choice and seed changes, "
             f"{live.chords} chords, {live.grooves_saved} grooves saved, {live.groove_recalls} recalled, "
-            f"{live.continued} of {live.continues_sent} continues done, {live.restarts} restart{'' if live.restarts == 1 else 's'}."
+            f"{live.continued} of {live.continues_sent} continues done, "
+            f"{live.restarts} restart{'' if live.restarts == 1 else 's'}."
         ),
         (
-            f"   Pace: {rate:.2f}x real time, so the stream {keeps_up}. Engine frame time "
-            f"{np.median(frames):.1f} ms typical, {frames.max():.1f} ms slowest."
+            f"   Speed: {typical:.1f} ms per {REALTIME_FRAME_MS:.0f} ms frame typical, {frames.max():.1f} ms slowest, "
+            f"so the engine runs at {speed:.2f}x real time while it is steered (about {OLD_SPEED:.2f}x before)."
+        ),
+        (
+            f"   Pace: the stream arrived at {rate:.2f}x real time. The engine stays about 1 s ahead, "
+            "so this tops out near 1.00x."
         ),
         *memory_lines(live, idle_mb),
-        f"   Silent seconds: {live.silent_seconds}. Watchdog revivals: {live.revived}.",
+        (
+            f"   Silent seconds: {len(live.silent_at)}{f' (at {silent})' if silent else ''}. "
+            f"Watchdog revivals: {live.revived}."
+        ),
         (
             f"   Text mapper: {health.get('text_mapper', '?')}. "
             f"Continue from audio: {health.get('clip_encoder', '?')}. GPU: {health.get('gpu', '?')}."
         ),
     ]
     if live.problems:
-        lines.append("   Problems:")
+        lines.append("   Events to look at (3-timeline.txt has everything):")
         lines.extend(f"   - {problem}" for problem in live.problems[:20])
     else:
         lines.append("   No errors from the engine.")
     return lines
+
+
+def preflight(smi: str | None, total_mb: int) -> tuple[int | None, list[str]]:
+    """Other programs' share of the GPU before anything starts, and the CUDA ones by name."""
+    while True:
+        used = gpu_used_mb(smi)
+        programs = gpu_programs(smi)
+        if used is None or used <= BUSY_MB:
+            return used, programs
+        say(f"Other programs already hold {used:,} MB of the GPU's {total_mb:,} MB. The model needs several GB,")
+        say("so the first step can run out of memory. Close what you can, such as games, LM Studio, Ollama,")
+        say("ComfyUI or a second Magenta.")
+        if programs:
+            say("Programs using CUDA right now: " + "; ".join(programs))
+        answer = input("Press Enter to check again, or type go and press Enter to run anyway: ")
+        if answer.strip().lower() == "go":
+            return used, programs
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -539,17 +678,24 @@ def main(argv: list[str] | None = None) -> int:
     smi = find_nvidia_smi()
     gpus = query_gpus(smi, "name,driver_version,memory.total")
     gpu_text = "; ".join(f"{row[0]} (driver {row[1]}, {int(float(row[2])):,} MB)" for row in gpus if len(row) >= 3)
+    total_mb = sum(int(float(row[2])) for row in gpus if len(row) >= 3)
 
     say("Magenta GPU check")
     say(f"  GPU: {gpu_text or 'unknown, nvidia-smi was not found'}")
     say(f"  Results: {out_dir}")
-    say(f"  This takes about {args.minutes + 5:.0f} minutes. Leave other GPU programs closed so the memory numbers mean something.")
+    say(f"  This takes about {args.minutes + 5:.0f} minutes.")
     say()
     while port_open():
         say("The Magenta window (or another engine) is running on port 8765 and holds the GPU.")
         input("Close it, then press Enter to go on. ")
+    busy_mb, programs = preflight(smi, total_mb)
 
-    report = [f"Magenta GPU check, {datetime.now().astimezone():%Y-%m-%d %H:%M}", f"GPU: {gpu_text or 'unknown'}", ""]
+    report = [f"Magenta GPU check, {datetime.now().astimezone():%Y-%m-%d %H:%M}", f"GPU: {gpu_text or 'unknown'}"]
+    if busy_mb is not None:
+        report.append(f"Other programs held {busy_mb:,} MB of the GPU when the check began.")
+    if programs:
+        report.append("Programs using CUDA then: " + "; ".join(programs))
+    report.append("")
     techno = out_dir / "techno.wav"
     if not args.skip_generate:
         say("1/3  Speed: 20 s of techno with magenta generate")
@@ -558,9 +704,7 @@ def main(argv: list[str] | None = None) -> int:
             [sys.executable, "-m", "magenta_win.cli", "generate", "--prompt", "techno", "--seconds", "20", "--out", str(techno)],
             out_dir / "1-generate.log",
         )
-        report += [f"1. Speed: {speed_line(first)}", f"   {frame_summary(first.frames_ms)}."]
-        if not first.ok:
-            report += [f"   | {line}" for line in first.tail]
+        report += generate_lines("1. Speed", first, busy_mb)
         say()
         say("2/3  Continue from a clip: carry techno.wav on for 10 s")
         if techno.is_file():
@@ -572,9 +716,7 @@ def main(argv: list[str] | None = None) -> int:
                 ],
                 out_dir / "2-continue.log",
             )
-            report.append(f"2. Continue from a clip: {'OK, ' + speed_line(second) if second.ok else speed_line(second)}")
-            if not second.ok:
-                report += [f"   | {line}" for line in second.tail]
+            report += generate_lines("2. Continue from a clip", second, busy_mb)
         else:
             report.append("2. Continue from a clip: skipped, because step 1 wrote no techno.wav.")
         say()
@@ -606,7 +748,7 @@ def main(argv: list[str] | None = None) -> int:
     say()
     say("=" * 72)
     say(text)
-    say("Send me report.txt from that folder, plus 3-server.log if anything failed.")
+    say("Send me report.txt from that folder, plus 3-timeline.txt and 3-server.log if anything failed.")
     if sys.platform == "win32":
         os.startfile(out_dir)  # open the results for the person who double-clicked
     return 0

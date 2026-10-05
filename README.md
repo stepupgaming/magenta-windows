@@ -60,7 +60,7 @@ pnpm dev
 
 The window still starts `engine\server.py` with no flags. That process listens on `127.0.0.1:8765`.
 
-To check a GPU, close the window and double-click `gpu-check.bat`. It times `magenta generate` on 20 s of techno, continues that file, then streams from the engine for 10 minutes while it moves three style faders four times a second, changes choices and seed, plays chords, saves and recalls a groove, continues from the stream, and restarts once. It samples GPU memory every 10 seconds and writes `engine\logs\gpu-check\<time>\report.txt` with the wavs it made. `gpu-check.bat --minutes 3` shortens the live part.
+To check a GPU, close the window and double-click `gpu-check.bat`. It times `magenta generate` on 20 s of techno, continues that file, then streams from the engine for 10 minutes while it moves three style faders four times a second, changes choices and seed, plays chords, saves and recalls a groove, continues from the stream, and restarts once. Every 10 seconds it reads the engine's own GPU memory from `/health` (`cuda_memory`, so other programs on the GPU don't count) and the whole GPU's from nvidia-smi. It writes `engine\logs\gpu-check\<time>\report.txt`, `3-timeline.txt` with every action and engine event, and the wavs it made. If other programs already hold more than 3 GB of the GPU, it names the CUDA ones and asks before it starts. `gpu-check.bat --minutes 3` shortens the live part.
 
 ## The stage
 
