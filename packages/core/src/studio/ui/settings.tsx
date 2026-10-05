@@ -40,9 +40,23 @@ function mapperSummary(health: EngineHealth | null): {
   return MAPPER_COPY[health.text_mapper];
 }
 
+function encoderSummary(health: EngineHealth | null): {
+  label: string;
+  tone: string;
+} {
+  if (!health) {
+    return { label: "Engine offline", tone: "text-white/40" };
+  }
+  if (!health.clip_encoder) {
+    return { label: "Not supported by this engine", tone: "text-white/40" };
+  }
+  return MAPPER_COPY[health.clip_encoder];
+}
+
 function EngineSection() {
   const health = useLive((state) => state.health);
   const mapper = mapperSummary(health);
+  const encoder = encoderSummary(health);
   return (
     <div className="border-white/[0.07] border-b p-3">
       <p className="font-medium text-sm">Engine</p>
@@ -60,6 +74,17 @@ function EngineSection() {
             }
           >
             <span>{mapper.label}</span>
+          </Hint>
+        </dd>
+        <dt className="text-white/45">Continue from audio</dt>
+        <dd className={`text-right ${encoder.tone}`}>
+          <Hint
+            label={
+              health?.clip_encoder_detail ??
+              "Google's SpectroStream encoder turns a clip back into music the model can carry on."
+            }
+          >
+            <span>{encoder.label}</span>
           </Hint>
         </dd>
       </dl>

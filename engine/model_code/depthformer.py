@@ -140,6 +140,22 @@ class TransformerStack(nn.Module):
         """Per-layer cross-attention (k, v) of an encoded source."""
         return [blk["cross_attention"]._kv(source) for blk in self.layers]
 
+    def context_kv(self, x, source, keep):
+        """Teacher-force x [b,T,d] with source [b,T,enc] in one batched pass.
+
+        Returns per-layer self and cross (k, v) for the last `keep` steps: the
+        caches a stream holds after stepping through the same T inputs, without
+        T separate steps."""
+        self_kv, cross_kv = [], []
+        for blk in self.layers:
+            x, k, v = blk["self_attention"].forward_kv(x)
+            self_kv.append((k[:, -keep:], v[:, -keep:]))
+            if self.use_cross:
+                x, k, v = blk["cross_attention"].forward_kv(x, source)
+                cross_kv.append((k[:, -keep:], v[:, -keep:]))
+            x = blk["ffn"](x)
+        return self_kv, cross_kv
+
 
 class EncoderEmbedding(nn.Module):
     """Embeds the conditioning block [b,t,num_channels] -> source [b,t,enc_dim]."""
@@ -249,6 +265,19 @@ class MultivariateDecoder(nn.Module):
         """Per-layer temporal cross-attention (k, v) for an encoded source."""
         return self.temporal_body.source_kv(source)
 
+    def context_kv(self, frames, source, keep):
+        """The temporal caches after hearing `frames` [b,N,Q] (unique codes).
+
+        Teacher-forces the start token and frames[:, :-1] in one batched pass,
+        conditioned on `source` [b,1,enc] at every step, and returns per-layer
+        self and cross (k, v) for the last `keep` steps. A stream continues by
+        embedding frames[:, -1] next, as if it had just generated those frames."""
+        b, n, q = frames.shape
+        start = frames.new_zeros((b, 1, q))  # sos_id = 0, as in forward()
+        inputs = torch.cat([start, frames[:, :-1]], dim=1)
+        x = _mean_f32(self.embed(inputs), axis=-2)
+        return self.temporal_body.context_kv(x, source.expand(b, n, -1), keep)
+
     def codebook_head(self, codebook, dtype):
         """`to_logits` kernel and bias for one codebook's tokens, as contiguous copies.
 
@@ -314,7 +343,7 @@ class MultivariateDecoder(nn.Module):
         tstep = temporal_step or self.temporal_step_fn
         dstep = depth_step or self.depth_step_fn
         to, new_self, new_cross = tstep(state["prev"], state["self"], state["cross"], source_frame)
-        keep = cfg.temporal_max_past + 1
+        keep = cfg.temporal_max_past  # past frames; the next step appends the current one
         state["self"] = [(k[:, -keep:], v[:, -keep:]) for k, v in new_self]
         state["cross"] = [(k[:, -keep:], v[:, -keep:]) for k, v in new_cross]
         dd = cfg.depth

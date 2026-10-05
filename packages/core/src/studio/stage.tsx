@@ -3,12 +3,14 @@
 import { Toaster } from "@workspace/ui/components/sonner";
 import { TooltipProvider } from "@workspace/ui/components/tooltip";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import { captureLast, toggleRecord } from "./actions.ts";
-import { pruneClips } from "./clips.ts";
+import { decodeFile, pruneClips } from "./clips.ts";
 import {
   freshStart,
   recallScene,
   reroll,
+  rewind,
   saveScene,
   startConductor,
   tapTempo,
@@ -37,6 +39,8 @@ import { TopBar } from "./ui/top-bar.tsx";
 import { Visualizer } from "./ui/visualizer.tsx";
 
 /** Soft light behind the stage, tinted by whatever the blend is right now. */
+const EXTENSION = /\.[^.]+$/;
+
 function Ambience() {
   const prompts = useStudio((state) => state.prompts);
   const mixMode = useStudio((state) => state.mixMode);
@@ -98,6 +102,11 @@ export function Stage() {
   const [library, setLibrary] = useState(false);
   const [audioSource, setAudioSource] = useState<AudioSource | null>(null);
   const promptInput = useRef<HTMLInputElement>(null);
+  const continueInput = useRef<HTMLInputElement>(null);
+  const openContinueFile = useCallback(
+    () => continueInput.current?.click(),
+    []
+  );
 
   useEffect(() => {
     const root = document.documentElement;
@@ -195,6 +204,20 @@ export function Stage() {
         id: "takes.open",
         label: "Show takes",
         run: () => setTakes(true),
+      },
+      {
+        group: "Continue",
+        id: "continue.rewind",
+        label: "Rewind and let the model play on from there",
+        run: () => {
+          rewind(useStudio.getState().rewindSeconds).catch(() => undefined);
+        },
+      },
+      {
+        group: "Continue",
+        id: "continue.file",
+        label: "Continue from an audio file",
+        run: openContinueFile,
       },
       {
         group: "Style",
@@ -303,7 +326,7 @@ export function Stage() {
       })),
     ];
     return registerActions(list);
-  }, [openHelp]);
+  }, [openHelp, openContinueFile]);
 
   if (!ready) {
     return <div className="h-dvh w-screen bg-[#09080b]" />;
@@ -315,6 +338,7 @@ export function Stage() {
         <Ambience />
         <div className="relative flex min-h-0 flex-1 flex-col">
           <TopBar
+            onContinueFile={openContinueFile}
             onHelp={openHelp}
             onPalette={openPalette}
             onTakes={() => setTakes(true)}
@@ -354,6 +378,28 @@ export function Stage() {
         <AudioPromptDialog
           onClose={() => setAudioSource(null)}
           source={audioSource}
+        />
+        <input
+          accept="audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (!file) {
+              return;
+            }
+            decodeFile(file)
+              .then((clip) =>
+                setAudioSource({
+                  clip,
+                  name: file.name.replace(EXTENSION, ""),
+                  use: "continue",
+                })
+              )
+              .catch(() => toast.error("That file did not decode as audio."));
+          }}
+          ref={continueInput}
+          type="file"
         />
         <Toaster position="bottom-center" theme="dark" />
       </div>

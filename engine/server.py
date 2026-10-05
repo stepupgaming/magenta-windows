@@ -36,6 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from transformers import AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
+from magenta_win.clip_encoder_file import locate_clip_encoder
 from magenta_win.text_mapper import MapperFormatError, TextMapper
 from magenta_win.text_mapper_file import locate_mapper
 from magenta_win.watchdog import SilenceWatch, expects_silence
@@ -59,6 +60,25 @@ AUDIO_PROMPT_RATE = 16_000
 AUDIO_PROMPT_MIN_SECONDS = 0.5
 AUDIO_PROMPT_MAX_SECONDS = 60.0
 AUDIO_PROMPT_KEEP = 24
+FRAME_SECONDS = 1 / FRAMES_PER_SECOND
+# Continuing from a clip follows Google's engine: 48 kHz stereo, at most the 28 s
+# its encoder takes, with 25 frames (1 s) trimmed from each end. The encoder's
+# STFT is not warmed up at the start of a clip and is zero-padded at its end, so
+# tokens there do not reflect the audio; Google found 25 the sweet spot.
+CLIP_MAX_SECONDS = 28
+CLIP_TRIM_FRAMES = 25
+CLIP_MIN_SECONDS = 4.0
+CLIP_UPLOAD_MAX_SECONDS = 60.0
+CLIP_KEEP = 4
+# Heard frames decoded into a fresh codec state, so the first continuation audio
+# is the clip's own last heard frame and the join has no seam.
+CODEC_WARMUP_FRAMES = 32
+# Of those, frames whose audio is not sent: a fresh codec state needs context
+# before its output matches a decode of the whole clip.
+CODEC_SETTLE_FRAMES = 16
+# The clip's own sound, as the codec hears it, played ahead of the continuation.
+CLIP_LEAD_SECONDS = 2.0
+CLIP_LEAD_MAX_SECONDS = 8.0
 DRUM_MODES = {"auto": None, "on": [1], "off": [0]}
 
 _model: Any = None
@@ -75,6 +95,13 @@ _text_mapper_detail = "loads with the model"
 # later on the GPU lane, the same thread that replays the CUDA graph.
 _audio_clips: OrderedDict[str, np.ndarray] = OrderedDict()
 _audio_lock = threading.Lock()
+# Clips to continue from: 48 kHz stereo, [samples, 2].
+_clips: OrderedDict[str, np.ndarray] = OrderedDict()
+
+# Google's SpectroStream encoder, which turns a clip back into model tokens.
+_clip_encoder: Any = None
+_clip_encoder_state = "pending"
+_clip_encoder_detail = "loads with the model"
 
 
 def store_audio_clip(raw: bytes) -> tuple[str, float]:
@@ -100,6 +127,32 @@ def store_audio_clip(raw: bytes) -> tuple[str, float]:
 def audio_clip(clip_id: str) -> np.ndarray | None:
     with _audio_lock:
         return _audio_clips.get(clip_id)
+
+
+def store_clip(raw: bytes) -> tuple[str, float]:
+    """Keep a 48 kHz stereo clip (interleaved little-endian float32) to continue from."""
+    if len(raw) % 8 != 0:
+        raise ValueError("a clip must be interleaved stereo little-endian float32 samples")
+    samples = np.frombuffer(raw, dtype="<f4").astype(np.float32).reshape(-1, 2)
+    seconds = samples.shape[0] / SAMPLE_RATE
+    if seconds < CLIP_MIN_SECONDS:
+        raise ValueError(f"a clip to continue from needs at least {CLIP_MIN_SECONDS:g} seconds")
+    if seconds > CLIP_UPLOAD_MAX_SECONDS:
+        raise ValueError(f"a clip is longer than {CLIP_UPLOAD_MAX_SECONDS:g} seconds")
+    if not np.all(np.isfinite(samples)):
+        raise ValueError("a clip has samples that are not finite")
+    clip_id = hashlib.sha1(raw).hexdigest()[:16]
+    with _audio_lock:
+        _clips[clip_id] = samples
+        _clips.move_to_end(clip_id)
+        while len(_clips) > CLIP_KEEP:
+            _clips.popitem(last=False)
+    return clip_id, seconds
+
+
+def stored_clip(clip_id: str) -> np.ndarray | None:
+    with _audio_lock:
+        return _clips.get(clip_id)
 
 
 _audio_tower_fetched = False
@@ -178,6 +231,7 @@ def load_model() -> Any:
             _model_error = str(exc)
             raise
         load_text_mapper()
+        load_clip_encoder(model)
         _model = model
         _model_error = None
         return model
@@ -200,6 +254,28 @@ def load_text_mapper() -> None:
     except Exception as exc:  # noqa: BLE001 - the model must load even if the mapper cannot.
         _text_mapper, _text_mapper_state, _text_mapper_detail = None, "unavailable", f"unexpected error: {exc!r}"
     print(f"[magenta] text mapper {_text_mapper_state}: {_text_mapper_detail}", flush=True)
+
+
+def load_clip_encoder(model: Any) -> None:
+    """Load the SpectroStream encoder for continuing from a clip. Never stops the model."""
+    global _clip_encoder, _clip_encoder_state, _clip_encoder_detail
+    try:
+        found = locate_clip_encoder(
+            Path(os.environ["HUGGINGFACE_HUB_CACHE"]),
+            allow_download=os.environ.get("HF_HUB_OFFLINE") != "1",
+            log=lambda message: print(f"[magenta] {message}", flush=True),
+        )
+        _clip_encoder_state, _clip_encoder_detail = found.state, found.detail
+        if found.encoder is not None and found.quantizer is not None:
+            from model_code.spectrostream_encoder import load_clip_encoder as build_clip_encoder
+
+            levels = int(model.config.num_codebooks)
+            _clip_encoder = build_clip_encoder(found.encoder, found.quantizer, levels).to(model._dev)
+    except (OSError, ValueError, RuntimeError) as exc:
+        _clip_encoder, _clip_encoder_state, _clip_encoder_detail = None, "unavailable", str(exc)
+    except Exception as exc:  # noqa: BLE001 - the model must load even if the encoder cannot.
+        _clip_encoder, _clip_encoder_state, _clip_encoder_detail = None, "unavailable", f"unexpected error: {exc!r}"
+    print(f"[magenta] clip encoder {_clip_encoder_state}: {_clip_encoder_detail}", flush=True)
 
 
 def _as_embedding(value: Any, device: torch.device) -> torch.Tensor:
@@ -304,6 +380,17 @@ def clean_spec(raw: dict[str, Any] | None) -> dict[str, Any]:
         "seed": int(raw.get("seed", 0)),
         "style_levels": int(np.clip(int(raw.get("style_levels", STYLE_LEVELS)), 1, STYLE_TOKENS)),
     }
+
+
+def clean_lead(raw: Any) -> float:
+    """Seconds of a clip to play ahead of its continuation."""
+    try:
+        lead = float(raw)
+    except (TypeError, ValueError):
+        return CLIP_LEAD_SECONDS
+    if not np.isfinite(lead):
+        return CLIP_LEAD_SECONDS
+    return float(np.clip(lead, 0.0, CLIP_LEAD_MAX_SECONDS))
 
 
 def clean_slot(raw: Any) -> str | None:
@@ -504,6 +591,47 @@ class Session:
         self._spec_key = None
         self._apply(spec, flush=True)
 
+    def continue_from(
+        self, samples: np.ndarray, spec: dict[str, Any], lead: float = 0.0
+    ) -> tuple[np.ndarray, float]:
+        """Make the model continue a 48 kHz stereo clip, [samples, 2], from its end.
+
+        Encodes the last 28 s, trims the encoder's unreliable edges, and fills
+        the model's memory with what it would hold after playing those frames.
+        Style and notes are masked while it hears them, as in Google's engine:
+        the clip is the context, and the spec steers only what comes next.
+
+        Returns the clip's last `lead` seconds before the pickup as the codec
+        decodes them, to play ahead of the continuation with no seam, and how
+        many seconds before the clip's end the new music starts."""
+        if self.streamer is None:
+            raise RuntimeError("session is not started")
+        if _clip_encoder is None:
+            raise RuntimeError(f"Continuing from audio is unavailable: {_clip_encoder_detail}")
+        frames = min(samples.shape[0] // SAMPLES_PER_FRAME, CLIP_MAX_SECONDS * FRAMES_PER_SECOND)
+        if frames - 2 * CLIP_TRIM_FRAMES <= self.streamer.KEEP:
+            raise ValueError("the clip is too short to continue from")
+        tail = np.ascontiguousarray(samples[samples.shape[0] - frames * SAMPLES_PER_FRAME :], dtype=np.float32)
+        codes = _clip_encoder(torch.from_numpy(tail).to(self.model._dev)[None])
+        codes = codes[:, CLIP_TRIM_FRAMES : frames - CLIP_TRIM_FRAMES]
+        offsets = torch.arange(codes.shape[-1], device=codes.device) * self.model.codebook_size
+        heard = codes + offsets + self.model.num_reserved_tokens
+        drums = [0] if spec["drums"] == "off" else [-1]
+        cond = self.model._conditioning([-1] * STYLE_TOKENS, [-1] * self.model.num_notes, drums, [-1, -1, -1])
+        self.streamer.load_context(heard, self.model.depthformer.encode(cond).to(self.model._dt))
+        # The codec has one frame of latency: decoding heard frames returns audio
+        # up to the second to last, and the next decode starts with the last one.
+        lead_frames = min(round(lead * FRAMES_PER_SECOND), heard.shape[1] - 1 - CODEC_SETTLE_FRAMES)
+        context = max(CODEC_WARMUP_FRAMES, lead_frames + CODEC_SETTLE_FRAMES + 1)
+        self.decode_state = self.model.init_decode_state()
+        warm = self.model.decode_stream(heard[:, -context:], self.decode_state)
+        keep = max(0, lead_frames) * SAMPLES_PER_FRAME
+        lead_audio = warm[0, warm.shape[1] - keep :].float().cpu().numpy() if keep else np.zeros((0, 2), np.float32)
+        self._spec_key = None
+        self._sustain_source = None
+        self._apply(spec)
+        return lead_audio, (CLIP_TRIM_FRAMES + 1) * FRAME_SECONDS
+
     def revive(self, spec: dict[str, Any]) -> None:
         """Bring a model that fell silent back to the memory it had after priming."""
         if self.streamer is None or self._factory is None:
@@ -586,6 +714,8 @@ def health() -> dict[str, Any]:
         "sample_rate": SAMPLE_RATE,
         "text_mapper": _text_mapper_state,
         "text_mapper_detail": _text_mapper_detail,
+        "clip_encoder": _clip_encoder_state,
+        "clip_encoder_detail": _clip_encoder_detail,
     }
 
 
@@ -629,6 +759,17 @@ async def post_audio_prompt(request: Request) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await asyncio.to_thread(prefetch_audio_tower)
+    return {"id": clip_id, "seconds": round(seconds, 3)}
+
+
+@app.post("/clip")
+async def post_clip(request: Request) -> dict[str, Any]:
+    """Store a 48 kHz stereo float32 clip (interleaved) to continue from."""
+    raw = await request.body()
+    try:
+        clip_id, seconds = store_clip(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"id": clip_id, "seconds": round(seconds, 3)}
 
 
@@ -722,6 +863,8 @@ async def stream_ws(websocket: WebSocket) -> None:
             restart = False
             flush = False
             groove: str | None = None
+            clip: str | None = None
+            lead = CLIP_LEAD_SECONDS
             while True:
                 try:
                     payload = await take_message(0)
@@ -747,6 +890,9 @@ async def stream_ws(websocket: WebSocket) -> None:
                 restart = restart or op == "restart"
                 flush = flush or bool(payload.get("cut", False))
                 groove = clean_slot(payload.get("groove")) or groove
+                if clean_slot(payload.get("continue")):
+                    clip = clean_slot(payload.get("continue"))
+                    lead = clean_lead(payload.get("lead"))
             if restart:
                 # A fresh session clears the model's memory.
                 await asyncio.to_thread(lane.call, session.close)
@@ -762,6 +908,34 @@ async def stream_ws(websocket: WebSocket) -> None:
                 else:
                     await asyncio.to_thread(lane.call, session.recall, memory, current)
                     watch.reset()
+            if clip:
+                samples = stored_clip(clip)
+                failure = "The clip expired on the engine. Send it again." if samples is None else None
+                if samples is not None:
+                    try:
+                        lead_audio, pickup = await asyncio.to_thread(
+                            lane.call, session.continue_from, samples, current, lead
+                        )
+                    except (RuntimeError, ValueError) as exc:
+                        failure = str(exc)
+                    else:
+                        # Every byte after this message is the clip's lead-in, then
+                        # the continuation.
+                        await websocket.send_json(
+                            {
+                                "type": "continued",
+                                "clip": clip,
+                                "lead": round(lead_audio.shape[0] / SAMPLE_RATE, 3),
+                                "pickup": round(pickup, 3),
+                            }
+                        )
+                        if lead_audio.size:
+                            await websocket.send_bytes(pcm_bytes(lead_audio))
+                        sent = int(lead_audio.shape[0])
+                        wall = time.perf_counter()
+                        watch.reset()
+                if failure is not None:
+                    await websocket.send_json({"type": "continue-failed", "clip": clip, "message": failure})
             samples, frame_ms = await asyncio.to_thread(lane.call, session.step, current, 4, flush)
             if samples.size:
                 await websocket.send_bytes(pcm_bytes(samples))
@@ -798,7 +972,17 @@ async def stream_ws(websocket: WebSocket) -> None:
             await asyncio.to_thread(lane.call, session.close)
 
 
-def render(spec: dict[str, Any], seconds: float, output: Path) -> None:
+def render(
+    spec: dict[str, Any],
+    seconds: float,
+    output: Path,
+    continue_clip: np.ndarray | None = None,
+    lead_in: float = 0.0,
+) -> None:
+    """Write `seconds` of music to a wav. With `continue_clip` (48 kHz stereo),
+    the music continues that clip, and the wav starts with up to `lead_in`
+    seconds of the clip before the point where the model picks up, as the codec
+    decodes them, so the join has no seam."""
     import soundfile as sf
 
     spec = clean_spec(spec)
@@ -809,7 +993,12 @@ def render(spec: dict[str, Any], seconds: float, output: Path) -> None:
         session.start(spec)
         target = int(seconds * SAMPLE_RATE)
         pieces: list[np.ndarray] = []
-        got = 0
+        if continue_clip is not None:
+            lead_audio, pickup = session.continue_from(continue_clip, spec, lead_in)
+            pieces.append(lead_audio)
+            target += int(lead_audio.shape[0])
+            print(f"[magenta] continuing {pickup:.2f}s before the end of the clip", flush=True)
+        got = sum(int(piece.shape[0]) for piece in pieces)
         started = time.perf_counter()
         while got < target:
             samples, frame_ms = session.step(spec, 4)

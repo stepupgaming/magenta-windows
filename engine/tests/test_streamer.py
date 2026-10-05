@@ -172,3 +172,71 @@ def test_a_closed_streamer_refuses_to_step() -> None:
     stream.close()
     with pytest.raises(RuntimeError):
         stream.step()
+
+
+def test_streamer_attends_the_trained_window() -> None:
+    """Greedy streaming must match the eager path, which trims to the window the
+    model was trained with, well past the point where the window fills."""
+    decoder = tiny_decoder()
+    warmup, frames = 13, 12
+    stream = CudaGraphStreamer(decoder, source(1), torch.float32, top_k=1, warmup=warmup, capture=False)
+    streamed = [stream.step()[0, 0].tolist() for _ in range(frames)]
+
+    def greedy(logits: torch.Tensor, _q: int, lo: int, hi: int) -> torch.Tensor:
+        return logits[..., lo:hi].argmax(-1) + lo
+
+    with torch.no_grad():
+        state = decoder.init_streaming(1, torch.device("cpu"))
+        eager = [decoder.step(state, source(1), sampler=greedy)[0][0, 0].tolist() for _ in range(warmup + frames)]
+    assert streamed == eager[warmup:]
+
+
+def unique_frames(count: int, seed: int) -> torch.Tensor:
+    """Random frames as unique codes: codebook q's code c is 6 + q * 1024 + c."""
+    codes = torch.randint(0, 1024, (1, count, 12), generator=torch.Generator().manual_seed(seed))
+    return codes + 6 + torch.arange(12) * 1024
+
+
+def test_context_kv_matches_stepping_through_the_frames() -> None:
+    decoder = tiny_decoder()
+    frames = unique_frames(20, seed=4)
+    keep = decoder.cfg.temporal_max_past
+    with torch.no_grad():
+        batched_self, batched_cross = decoder.context_kv(frames, source(2), keep)
+        state = decoder.init_streaming_f(1, torch.device("cpu"))
+        for t in range(frames.shape[1]):
+            _, new_self, new_cross = decoder.temporal_step_fn(state["prev"], state["self"], state["cross"], source(2))
+            state["self"] = [(k[:, -keep:], v[:, -keep:]) for k, v in new_self]
+            state["cross"] = [(k[:, -keep:], v[:, -keep:]) for k, v in new_cross]
+            state["prev"] = frames[:, t : t + 1]
+    for batched, stepped in ((batched_self, state["self"]), (batched_cross, state["cross"])):
+        for (k1, v1), (k2, v2) in zip(batched, stepped, strict=True):
+            torch.testing.assert_close(k1, k2, atol=1e-5, rtol=1e-5)
+            torch.testing.assert_close(v1, v2, atol=1e-5, rtol=1e-5)
+
+
+def test_load_context_continues_like_the_eager_path() -> None:
+    """After hearing the same frames, the streamer and the eager path pick the
+    same greedy continuation."""
+    decoder = tiny_decoder()
+    frames = unique_frames(24, seed=5)
+    stream = CudaGraphStreamer(decoder, source(1), torch.float32, top_k=1, warmup=8, capture=False)
+    with torch.no_grad():
+        stream.load_context(frames, source(1))
+    continued = [stream.step()[0, 0].tolist() for _ in range(10)]
+
+    def greedy(logits: torch.Tensor, _q: int, lo: int, hi: int) -> torch.Tensor:
+        return logits[..., lo:hi].argmax(-1) + lo
+
+    with torch.no_grad():
+        state = decoder.init_streaming(1, torch.device("cpu"))
+        for t in range(frames.shape[1]):
+            decoder.step(state, source(1), forced_frame=frames[:, t : t + 1])
+        eager = [decoder.step(state, source(1), sampler=greedy)[0][0, 0].tolist() for _ in range(10)]
+    assert continued == eager
+
+
+def test_load_context_needs_more_than_the_window() -> None:
+    stream = streamer(tiny_decoder())
+    with pytest.raises(ValueError):
+        stream.load_context(unique_frames(stream.KEEP, seed=1), source(1))

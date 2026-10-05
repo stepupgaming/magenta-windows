@@ -56,7 +56,7 @@ pnpm dev
 
 `bun run dev` and `pnpm dev` both run `bin/dev.mjs`, which runs `pnpm --filter native tauri dev`. That opens the desktop window at http://localhost:3000. `pnpm web dev` is the browser shell on port 3001.
 
-`generate` defaults: temperature 1.05, top-k 48, style 2.4, style detail 6, note strength 0.8, drums off, seed 7, wav path `magenta.wav`. `--seconds` is required and the maximum is 120. Repeat `--prompt` up to 8 times. A weight is `TEXT:WEIGHT`. The full menu is `magenta generate --help`.
+`generate` defaults: temperature 1.05, top-k 48, style 2.4, style detail 6, note strength 0.8, drums off, seed 7, wav path `magenta.wav`. `--seconds` is required and the maximum is 120. Repeat `--prompt` up to 8 times. A weight is `TEXT:WEIGHT`. `--continue song.wav` makes the model carry on from the end of any audio file instead of starting fresh, and the wav starts with `--lead-in` seconds of the file (4 by default) so you hear the join. The full menu is `magenta generate --help`.
 
 The window still starts `engine\server.py` with no flags. That process listens on `127.0.0.1:8765`.
 
@@ -66,6 +66,7 @@ The window has five areas. Every control can also be reached from the command pa
 
 - **Style.** Up to eight prompts, blended by weight. List mode gives each prompt a fader with mute and solo. Space mode places prompts in a field and blends them by distance from a listener you drag, fling, or set to orbit. A prompt can be text or a slice of an audio file (drop one on the panel). The Library (/) searches several hundred prompts by genre, instrument, mood, texture, region, and era. It has starter blends, favorites, recents, and preview as you browse.
 - **Model.** Style strength, style detail, note strength, temperature, and a spring-loaded Chaos knob that the pitch wheel also drives. Style detail is how many of the 12 style tokens steer, coarsest first. Google's apps use 6, and so does the default. Drums are auto, on, or off. Choices (top-k) and the seed change while the music plays. Fresh clears the model's memory. If the model falls silent while it should be playing, the engine wakes it after six seconds and says so.
+- **Continue.** The model can pick up from any audio as if it had just played it. Rewind (Backspace) goes back 5 to 20 seconds in what the model played and lets it take the music somewhere new from there. A take, or a file of your own (Rewind menu, Continue from a file), works the same way. The engine hears up to 28 seconds, replays the last two so you hear the join, and the new music starts about a second before the end, steered by your prompts and notes.
 - **Scenes.** Eight slots that store the prompts and knobs. Number keys recall them with a morph over a set number of beats, or a cut. A scene saved while playing also remembers the model's groove, and a cut back to it picks the music up from there.
 - **Notes.** Jam lets the model accompany the notes you hold. Solo plays only your notes. Hold latches chords, Strum lets held notes re-strike, Clearance keeps the model off neighboring semitones. The keys are A to ' on the home row, Z and X change octave. Chord pads follow a key, and a progression plays at the tempo.
 - **Effects and takes.** DJ filter, three-band EQ, tempo-synced echo, reverb, and a limiter run in the window. Rec records what you hear. Keep (C) saves the last 10 to 60 seconds that already played. Takes download as WAV or go back in as an audio prompt.
@@ -104,6 +105,8 @@ If the release does not exist yet, `magenta load` and `magenta generate` downloa
 
 Text prompts also go through the MusicCoCa text mapper, as they do in Google's apps. It is about 86 MB, comes from `magenta-rt-public` on Google Cloud Storage, and lands in the same cache under `models--google--magenta-realtime-2`. The first load downloads it when it is missing, and new releases include it. Without it the model still plays, but text prompts land on different style tokens than upstream. Set `MAGENTA_TEXT_MAPPER=off` to skip it.
 
+Continuing from audio uses Google's SpectroStream encoder and its codebook, about 37 MB and 67 MB from the same bucket, kept in the same place. They download with the model unless `HF_HUB_OFFLINE=1`, and new releases include them. Without them everything else still works, and Settings says why continuing is unavailable.
+
 Pack or check the splitter without touching the GPU:
 
 ```powershell
@@ -127,4 +130,4 @@ Publish a release by pushing a `v0.0.0` tag, or by running the `Release Windows`
 
 ## License
 
-The app shell is MIT (`LICENSE`, Copyright (c) 2026 Dest). `engine/model_code` is Apache-2.0. The weight files stay under their Hugging Face licenses and are downloaded, not vendored into git. `engine/magenta_win/text_mapper.py` reimplements the architecture of Google's MusicCoCa text mapper. Its weights, `mapper.tflite` from Magenta RealTime 2, are by Google and licensed CC BY 4.0.
+The app shell is MIT (`LICENSE`, Copyright (c) 2026 Dest). `engine/model_code` is Apache-2.0. The weight files stay under their Hugging Face licenses and are downloaded, not vendored into git. `engine/magenta_win/text_mapper.py` reimplements the architecture of Google's MusicCoCa text mapper. Its weights, `mapper.tflite` from Magenta RealTime 2, are by Google and licensed CC BY 4.0. `engine/model_code/spectrostream_encoder.py` comes from the community PyTorch port (Apache-2.0), and the SpectroStream encoder and codebook weights it loads are also Google's, under CC BY 4.0.

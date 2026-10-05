@@ -11,16 +11,18 @@ import {
   ChevronDown,
   CircleHelp,
   Command,
+  FileAudio,
   History,
   Library,
   Loader2,
   Play,
   RotateCw,
   Square,
+  Undo2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { captureLast, formatTime, toggleRecord } from "../actions.ts";
-import { tapTempo, togglePlay } from "../conductor.ts";
+import { rewind, tapTempo, togglePlay } from "../conductor.ts";
 import { engine } from "../engine.ts";
 import { useLive, useStudio } from "../store.ts";
 import { FRAME_MS } from "../types.ts";
@@ -345,11 +347,90 @@ function RecordControls({ onTakes }: { onTakes: () => void }) {
   );
 }
 
+const REWIND_CHOICES = [5, 10, 20];
+
+function RewindControls({ onContinueFile }: { onContinueFile: () => void }) {
+  const seconds = useStudio((state) => state.rewindSeconds);
+  const patch = useStudio((state) => state.patch);
+  const busy = useLive((state) => state.continuing !== null);
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="flex h-8 items-center rounded-full border border-white/[0.09]">
+      <Hint
+        keys="Backspace"
+        label={`Go back ${seconds} seconds in what the model played and let it take the music somewhere new from there`}
+      >
+        <button
+          aria-label="Rewind"
+          className="flex h-full items-center gap-1.5 rounded-l-full pr-1.5 pl-3 font-medium text-white/75 text-xs hover:text-white disabled:opacity-60"
+          disabled={busy}
+          onClick={() => {
+            rewind(seconds).catch(() => undefined);
+          }}
+          type="button"
+        >
+          {busy ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Undo2 className="size-3.5" />
+          )}
+          Rewind {seconds}s
+        </button>
+      </Hint>
+      <Popover onOpenChange={setOpen} open={open}>
+        <PopoverTrigger asChild={true}>
+          <button
+            aria-label="Rewind options"
+            className="flex h-full items-center rounded-r-full pr-2 pl-1 text-white/50 hover:text-white"
+            type="button"
+          >
+            <ChevronDown className="size-3.5" />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent
+          className="w-56 border-white/10 bg-[#16151a] p-1 text-white"
+          sideOffset={6}
+        >
+          {REWIND_CHOICES.map((choice) => (
+            <button
+              className="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-sm text-white/80 hover:bg-white/[0.07] hover:text-white disabled:opacity-50"
+              disabled={busy}
+              key={choice}
+              onClick={() => {
+                setOpen(false);
+                patch({ rewindSeconds: choice });
+                rewind(choice).catch(() => undefined);
+              }}
+              type="button"
+            >
+              Rewind {choice}s
+            </button>
+          ))}
+          <div className="my-1 h-px bg-white/[0.07]" />
+          <button
+            className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm text-white/80 hover:bg-white/[0.07] hover:text-white"
+            onClick={() => {
+              setOpen(false);
+              onContinueFile();
+            }}
+            type="button"
+          >
+            <FileAudio className="size-3.5 text-white/50" />
+            Continue from a file
+          </button>
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
+
 export function TopBar({
+  onContinueFile,
   onHelp,
   onPalette,
   onTakes,
 }: {
+  onContinueFile: () => void;
   onHelp: () => void;
   onPalette: () => void;
   onTakes: () => void;
@@ -362,6 +443,7 @@ export function TopBar({
       <Vitals />
       <div className="flex-1" />
       <Tempo />
+      <RewindControls onContinueFile={onContinueFile} />
       <RecordControls onTakes={onTakes} />
       <div className="flex items-center gap-0.5">
         <MidiButton />

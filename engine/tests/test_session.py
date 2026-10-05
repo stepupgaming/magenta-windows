@@ -36,6 +36,7 @@ class TinyModel:
     num_notes = 128
     num_drums = 1
     num_reserved_tokens = 6
+    codebook_size = 1024
     _conditioning = MagentaRT2ForConditionalGeneration._conditioning
     _resolve_conditioning = MagentaRT2ForConditionalGeneration._resolve_conditioning
 
@@ -86,8 +87,26 @@ class TinyModel:
         return {}
 
     def decode_stream(self, frames: torch.Tensor, state: dict[str, Any]) -> torch.Tensor:
-        # Stand-in audio that carries the tokens, so tests can compare music.
-        return frames.float().reshape(1, -1, 1).repeat(1, 1, 2)
+        """Stand-in codec with the real one's shape: one frame of latency and
+        1920 samples per frame, each sample holding its frame's first code."""
+        state.setdefault("decoded", []).append(frames.clone())
+        pending = state.get("pending")
+        frames = frames if pending is None else torch.cat([pending, frames], dim=1)
+        state["pending"] = frames[:, -1:]
+        ready = frames[:, :-1, 0].float()
+        return ready.repeat_interleave(1920, dim=1)[..., None].repeat(1, 1, 2)
+
+
+class FakeClipEncoder:
+    """Stands in for SpectroStream: frame f encodes to codes (f * 12 + level) % 1024."""
+
+    def __init__(self) -> None:
+        self.inputs: list[torch.Tensor] = []
+
+    def __call__(self, wav: torch.Tensor) -> torch.Tensor:
+        self.inputs.append(wav)
+        frames = wav.shape[1] // 1920
+        return (torch.arange(frames * 12).reshape(1, frames, 12) % 1024).long()
 
 
 @pytest.fixture
@@ -135,7 +154,8 @@ def test_recalling_a_groove_plays_it_the_same_way(session: Any) -> None:
     first = play(session, spec())
     with torch.no_grad():
         session.recall(groove, spec())
-    assert play(session, spec()) == first
+    # The codec's one frame of latency plays the frame before the recall first.
+    assert play(session, spec())[1920:] == first[1920:]
 
 
 def test_revive_returns_to_the_primed_memory(session: Any) -> None:
@@ -163,3 +183,76 @@ def test_memory_ops_keep_the_spec() -> None:
     assert server.clean_slot("  scene-2 ") == "scene-2"
     assert server.clean_slot("") is None
     assert server.clean_slot(3) is None
+
+
+def clip(seconds: float) -> np.ndarray:
+    return np.random.default_rng(1).uniform(-0.5, 0.5, (int(seconds * 48_000), 2)).astype(np.float32)
+
+
+def heard_code(frame: int) -> float:
+    """The first unique code the stand-in encoder gives a kept clip frame."""
+    return float((frame * 12) % 1024 + 6)
+
+
+def test_continue_from_a_clip(session: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    encoder = FakeClipEncoder()
+    monkeypatch.setattr(server, "_clip_encoder", encoder)
+    play(session, spec())
+    with torch.no_grad():
+        lead, pickup = session.continue_from(clip(30.5), spec(), lead=1.0)
+    # The encoder hears the clip's last 28 s, in whole frames.
+    assert tuple(encoder.inputs[0].shape) == (1, 700 * 1920, 2)
+    assert pickup == pytest.approx(26 * 0.04)
+    # The model's next input is the last frame kept after trimming 25 from each end.
+    last_kept = 700 - 25 - 1
+    expected = (torch.arange(12) + last_kept * 12) % 1024 + torch.arange(12) * 1024 + 6
+    assert session.streamer.prev[0, 0].tolist() == expected.tolist()
+    # The lead-in is the 25 frames before the last kept one, as the codec decodes them.
+    assert lead.shape == (25 * 1920, 2)
+    frame_values = lead[::1920, 0].tolist()
+    assert frame_values == [heard_code(frame) for frame in range(last_kept - 25, last_kept)]
+    # The next audio starts with the last kept frame, then the continuation.
+    with torch.no_grad():
+        audio, _ = session.step(spec(), 4)
+    assert audio[0, 0] == heard_code(last_kept)
+    assert audio.shape[0] == 4 * 1920
+
+
+def test_continue_without_a_lead_still_warms_the_codec(session: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "_clip_encoder", FakeClipEncoder())
+    with torch.no_grad():
+        lead, _ = session.continue_from(clip(10), spec())
+    assert lead.shape == (0, 2)
+    assert session.decode_state["decoded"][0].shape[1] == 32
+
+
+def test_continue_needs_the_encoder(session: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "_clip_encoder", None)
+    monkeypatch.setattr(server, "_clip_encoder_detail", "downloads are off")
+    with pytest.raises(RuntimeError, match="downloads are off"):
+        session.continue_from(clip(10), spec())
+
+
+def test_continue_needs_a_long_enough_clip(session: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "_clip_encoder", FakeClipEncoder())
+    with pytest.raises(ValueError, match="too short"):
+        session.continue_from(clip(2.1), spec())
+
+
+def test_clean_lead_bounds_the_lead_in() -> None:
+    assert server.clean_lead(None) == 2.0
+    assert server.clean_lead("junk") == 2.0
+    assert server.clean_lead(float("nan")) == 2.0
+    assert server.clean_lead(-3) == 0.0
+    assert server.clean_lead(30) == 8.0
+    assert server.clean_lead(1.5) == 1.5
+
+
+def test_clip_store_checks_what_it_keeps() -> None:
+    good = clip(5)
+    clip_id, seconds = server.store_clip(good.tobytes())
+    assert seconds == pytest.approx(5.0)
+    np.testing.assert_array_equal(server.stored_clip(clip_id), good)
+    for bad in (b"123", clip(1).tobytes(), np.full((48_000 * 5, 2), np.nan, np.float32).tobytes()):
+        with pytest.raises(ValueError):
+            server.store_clip(bad)

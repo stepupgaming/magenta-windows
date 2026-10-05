@@ -4,7 +4,8 @@
 // without an NVIDIA GPU. Same HTTP routes, same websocket protocol. It plays
 // a simple synth that follows the held notes, the drum mode, and a timbre
 // picked from the prompt text, brighter with more style detail. Remembered
-// grooves restore the synth's clock. It is not the model.
+// grooves restore the synth's clock. Continuing from a clip replays the clip's
+// last seconds before the pickup, then the synth carries on. It is not the model.
 //
 //   node scripts/mock-engine.mjs            listens on 127.0.0.1:8765
 //   MAGENTA_PORT=9000 node scripts/mock-engine.mjs
@@ -19,6 +20,11 @@ const FRAMES_PER_STEP = 4;
 const SPEED = 0.96;
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const clips = new Map();
+// Clips to continue from: interleaved stereo float32 at 48 kHz.
+const continueClips = new Map();
+// The engine trims 25 frames from a clip's end, and the codec has one more.
+const PICKUP_SECONDS = 1.04;
+const CLIP_MIN_SECONDS = 4;
 let loaded = false;
 
 function health() {
@@ -31,6 +37,9 @@ function health() {
     sample_rate: RATE,
     text_mapper: "off",
     text_mapper_detail: "The mock engine has no model to refine prompts for.",
+    clip_encoder: "on",
+    clip_encoder_detail:
+      "The mock engine replays the clip's last seconds, then its own synth.",
   };
 }
 
@@ -80,6 +89,20 @@ const server = createServer(async (request, response) => {
     const id = createHash("sha1").update(body).digest("hex").slice(0, 16);
     clips.set(id, body.length / 4 / 16_000);
     send(response, 200, { id, seconds: body.length / 4 / 16_000 });
+    return;
+  }
+  if (request.url === "/clip" && request.method === "POST") {
+    const body = await readBody(request);
+    const seconds = body.length / 8 / RATE;
+    if (body.length % 8 !== 0 || seconds < CLIP_MIN_SECONDS || seconds > 60) {
+      send(response, 400, {
+        detail: `a clip must be 48 kHz stereo float32, ${CLIP_MIN_SECONDS} to 60 seconds`,
+      });
+      return;
+    }
+    const id = createHash("sha1").update(body).digest("hex").slice(0, 16);
+    continueClips.set(id, body);
+    send(response, 200, { id, seconds });
     return;
   }
   if (request.url === "/shutdown" && request.method === "POST") {
@@ -328,6 +351,45 @@ function stream(socket) {
     }
   };
 
+  const continueFrom = (id, lead) => {
+    const clip = continueClips.get(id);
+    if (!clip) {
+      text({
+        clip: id,
+        message: "The clip expired on the engine. Send it again.",
+        type: "continue-failed",
+      });
+      return;
+    }
+    const leadSeconds = Number.isFinite(lead)
+      ? Math.min(8, Math.max(0, lead))
+      : 2;
+    const end = Math.max(
+      0,
+      clip.length / 8 - Math.round(PICKUP_SECONDS * RATE)
+    );
+    const start = Math.max(0, end - Math.round(leadSeconds * RATE));
+    const out = Buffer.alloc((end - start) * 4);
+    for (let index = 0; index < end - start; index += 1) {
+      const at = (start + index) * 8;
+      const left = Math.max(-1, Math.min(1, clip.readFloatLE(at)));
+      const right = Math.max(-1, Math.min(1, clip.readFloatLE(at + 4)));
+      out.writeInt16LE(Math.round(left * 32_767), index * 4);
+      out.writeInt16LE(Math.round(right * 32_767), index * 4 + 2);
+    }
+    text({
+      clip: id,
+      lead: (end - start) / RATE,
+      pickup: PICKUP_SECONDS,
+      type: "continued",
+    });
+    if (out.length > 0) {
+      socket.write(frame(0x2, out));
+    }
+    sent = end - start;
+    wall = performance.now();
+  };
+
   const recall = (slot) => {
     const saved = grooves.get(slot);
     if (saved) {
@@ -366,6 +428,9 @@ function stream(socket) {
         spec = message;
         if (typeof message.groove === "string") {
           recall(message.groove);
+        }
+        if (typeof message.continue === "string") {
+          continueFrom(message.continue, message.lead);
         }
         return;
       default:

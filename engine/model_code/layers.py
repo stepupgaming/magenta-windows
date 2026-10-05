@@ -211,7 +211,7 @@ class SelfAttention(nn.Module):
         self.num_heads = num_heads
         self.units_per_head = units_per_head
 
-    def _branch(self, x):
+    def _branch_kv(self, x):
         h = self.pre_norm(x)
         a = self.attention
         q = a.project(h, a.query_projection_kernel)
@@ -223,10 +223,19 @@ class SelfAttention(nn.Module):
                                     a.sink_key_embeddings, a.sink_value_embeddings, mask,
                                     query_scale=a.query_scale(q.dtype))
         out = torch.einsum("btnh,dnh->btd", ctx, self.output_projection_kernel.to(ctx.dtype))
-        return self.post_norm(out)
+        return self.post_norm(out), k, v
+
+    def _branch(self, x):
+        return self._branch_kv(x)[0]
 
     def forward(self, x):
         return x + self._branch(x)
+
+    def forward_kv(self, x):
+        """Teacher-forced pass that also returns this layer's keys and values
+        [b, t, nh, uph], the cache a stream would hold after these steps."""
+        out, k, v = self._branch_kv(x)
+        return x + out, k, v
 
     # ---- streaming step with KV cache ----
     def init_state(self, batch, device, dtype):
@@ -295,7 +304,7 @@ class CrossAttention(nn.Module):
         v = torch.einsum("btd,dnh->btnh", source, a.value_projection_kernel.to(source.dtype))
         return k, v
 
-    def _branch(self, x, source):
+    def _branch_kv(self, x, source):
         h = self.pre_norm(x)
         a = self.attention
         q = torch.einsum("btd,dnh->btnh", h, a.query_projection_kernel.to(h.dtype))
@@ -307,10 +316,19 @@ class CrossAttention(nn.Module):
                                     a.sink_key_embeddings, a.sink_value_embeddings, mask,
                                     query_scale=a.query_scale(q.dtype))
         out = torch.einsum("btnh,dnh->btd", ctx, self.output_projection_kernel.to(ctx.dtype))
-        return self.post_norm(out)
+        return self.post_norm(out), k, v
+
+    def _branch(self, x, source):
+        return self._branch_kv(x, source)[0]
 
     def forward(self, x, source):
         return x + self._branch(x, source)
+
+    def forward_kv(self, x, source):
+        """Teacher-forced pass that also returns the source keys and values
+        [b, t, nh, uph], the cross cache a stream would hold after these steps."""
+        out, k, v = self._branch_kv(x, source)
+        return x + out, k, v
 
     def attend_fn(self, x, k, v):
         """Functional cross-attention given precomputed source KV [b,T,nh,uph]."""

@@ -8,7 +8,7 @@ import {
   SheetTitle,
 } from "@workspace/ui/components/sheet";
 import { cn } from "@workspace/ui/lib/utils";
-import { Download, Pause, Play, Sparkles, Trash2 } from "lucide-react";
+import { Download, Pause, Play, Redo2, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
   downloadTake,
@@ -16,6 +16,8 @@ import {
   removeTake,
   renameTake,
 } from "../actions.ts";
+import { CONTINUE_MIN } from "../clips.ts";
+import { continueClip } from "../conductor.ts";
 import { useLive } from "../store.ts";
 import type { Take } from "../types.ts";
 import type { AudioSource } from "./audio-dialog.tsx";
@@ -29,12 +31,14 @@ function barColor(played: boolean, source: Take["source"]): string {
 }
 
 function TakeRow({
+  onContinue,
   onStyle,
   onToggle,
   playing,
   progress,
   take,
 }: {
+  onContinue: () => void;
   onStyle: () => void;
   onToggle: () => void;
   playing: boolean;
@@ -42,6 +46,7 @@ function TakeRow({
   take: Take;
 }) {
   const [name, setName] = useState(take.name);
+  const busy = useLive((state) => state.continuing !== null);
   return (
     <li className="rounded-xl border border-white/[0.07] bg-white/[0.025] p-3">
       <div className="flex items-center gap-2">
@@ -102,6 +107,24 @@ function TakeRow({
           })}
         </span>
         <div className="flex items-center gap-0.5">
+          <Hint
+            label={
+              take.seconds < CONTINUE_MIN
+                ? `Continuing needs at least ${CONTINUE_MIN} seconds`
+                : "Let the model carry on from the end of this take"
+            }
+          >
+            <button
+              aria-label="Continue from this take"
+              className="flex h-7 items-center gap-1 rounded-full px-2 text-[11px] text-white/70 hover:bg-white/[0.07] hover:text-white disabled:opacity-40"
+              disabled={busy || take.seconds < CONTINUE_MIN}
+              onClick={onContinue}
+              type="button"
+            >
+              <Redo2 className="size-3.5" />
+              Continue
+            </button>
+          </Hint>
           <Hint label="Feed this take back to the model as a style">
             <button
               aria-label="Use as a style"
@@ -203,6 +226,17 @@ export function TakesSheet({
           {takes.map((take) => (
             <TakeRow
               key={take.id}
+              onContinue={() => {
+                onOpenChange(false);
+                continueClip(
+                  {
+                    left: take.left,
+                    right: take.right,
+                    sampleRate: take.sampleRate,
+                  },
+                  take.name
+                ).catch(() => undefined);
+              }}
               onStyle={() => {
                 onOpenChange(false);
                 onStyle({

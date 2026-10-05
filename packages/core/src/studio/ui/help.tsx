@@ -17,9 +17,9 @@ const SHORTCUTS: [string, string][] = [
   ["Esc", "Release every note"],
   ["1 – 8", "Recall a scene"],
   ["Shift + 1 – 8", "Save a scene"],
+  ["Backspace", "Rewind and play on from there"],
   ["R", "Record"],
   ["C", "Keep the last 30 seconds"],
-  ["T", "Takes"],
   ["/", "Search the sound library"],
   ["N", "Type a new prompt"],
   ["V", "List or Space"],
@@ -57,6 +57,10 @@ const IDEAS: [string, string][] = [
   [
     "Scenes",
     "A scene saves the sound: prompts, positions, and knobs. Morph glides there over a number of beats. Cut jumps at once, and a scene saved while playing also takes the model back to the groove it was in. With the same notes and knobs, it plays out the same way each time.",
+  ],
+  [
+    "Continue",
+    "The model can pick up from any audio as if it had just played it: a moment it played (Rewind goes back 5 to 20 seconds), a take, or a file of your own. It listens to up to 28 seconds, replays the last two, and carries on about a second before the end, steered by your prompts and notes. Each rewind takes the music somewhere new.",
   ],
   [
     "Timing",

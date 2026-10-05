@@ -172,6 +172,8 @@ export interface StudioSettings {
   prompts: StylePrompt[];
   /** Prompt texts added most recently, newest first. */
   recents: string[];
+  /** How far back Rewind takes the music. */
+  rewindSeconds: number;
   scenes: (Scene | null)[];
   seed: number;
   strum: boolean;
@@ -211,6 +213,7 @@ export const STUDIO_DEFAULTS: StudioSettings = {
   progressionBeats: 8,
   prompts: START_PROMPTS,
   recents: [],
+  rewindSeconds: 10,
   scenes: Array.from({ length: SCENE_SLOTS }, () => null),
   seed: MODEL_DEFAULTS.seed,
   strum: true,
@@ -352,6 +355,8 @@ export interface LiveState {
   audition: string | null;
   bootstrap: string;
   chaos: number;
+  /** What the model is being asked to continue, while the engine works on it. */
+  continuing: string | null;
   /** Scene grooves the engine remembers in this stream, by slot name. */
   grooves: string[];
   health: EngineHealth | null;
@@ -383,6 +388,7 @@ export const useLive = create<LiveState>()(() => ({
   audition: null,
   bootstrap: "",
   chaos: 0,
+  continuing: null,
   grooves: [],
   health: null,
   keyNotes: [],

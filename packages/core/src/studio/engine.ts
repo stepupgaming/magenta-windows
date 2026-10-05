@@ -3,19 +3,49 @@
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { LiveAudio } from "./audio.ts";
-import { loadClip } from "./clips.ts";
+import { LiveAudio, type StereoClip } from "./audio.ts";
+import {
+  CONTINUE_MAX,
+  CONTINUE_MIN,
+  interleaveTail,
+  loadClip,
+  toEngineRate,
+} from "./clips.ts";
 import type { WireSpec } from "./spec.ts";
 import { useLive, useStudio } from "./store.ts";
-import { ENGINE, ENGINE_SOCKET, type EngineHealth } from "./types.ts";
+import {
+  ENGINE,
+  ENGINE_SOCKET,
+  type EngineHealth,
+  SAMPLE_RATE,
+} from "./types.ts";
 
 const HEALTH_EVERY = 2000;
+const CONTINUE_TIMEOUT = 30_000;
 
 interface StreamMessage {
+  clip?: string;
+  lead?: number;
   message?: string;
   msPerFrame?: number;
+  pickup?: number;
   slot?: string;
   type?: string;
+}
+
+/** Where a continuation joins its clip, in seconds before the clip's end. */
+export interface ContinueResult {
+  /** The clip's own sound played ahead of the new music. */
+  lead: number;
+  /** Where the new music starts. */
+  pickup: number;
+}
+
+interface PendingContinue {
+  clip: string;
+  reject: (error: Error) => void;
+  resolve: (result: ContinueResult) => void;
+  timer: number;
 }
 
 async function bootstrapText(): Promise<string> {
@@ -51,6 +81,7 @@ class EngineClient {
   private readonly uploaded = new Map<string, string>();
   private readonly uploading = new Map<string, Promise<string | null>>();
   private lastSent = "";
+  private continuing: PendingContinue | null = null;
   private timer: number | null = null;
   private watchers = 0;
   private wasUp = false;
@@ -144,6 +175,7 @@ class EngineClient {
     }
     this.audio?.reset();
     this.lastSent = "";
+    this.dropContinue(new Error("The stream stopped."));
     const health = useLive.getState().health;
     set({
       grooves: [],
@@ -191,6 +223,57 @@ class EngineClient {
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ op: "forget", slot }));
     }
+  }
+
+  /** Store a clip on the engine to continue from. Returns its id. */
+  async uploadContinueClip(clip: StereoClip): Promise<string> {
+    const at48 = await toEngineRate(clip);
+    const seconds = Math.min(at48.left.length / SAMPLE_RATE, CONTINUE_MAX);
+    if (seconds < CONTINUE_MIN) {
+      throw new Error(
+        `Pick at least ${CONTINUE_MIN} seconds for the model to continue from.`
+      );
+    }
+    const samples = interleaveTail(at48, CONTINUE_MAX);
+    const response = await fetch(`${ENGINE}/clip`, {
+      body: samples,
+      headers: { "Content-Type": "application/octet-stream" },
+      method: "POST",
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(
+        detail || `The engine refused the clip (${response.status})`
+      );
+    }
+    return ((await response.json()) as { id: string }).id;
+  }
+
+  /**
+   * Have the model continue a stored clip, steered by `spec`. Resolves when
+   * the engine switches over: from then on the stream is the clip's last
+   * `lead` seconds, then the new music.
+   */
+  continueWith(
+    spec: WireSpec,
+    clip: string,
+    lead: number
+  ): Promise<ContinueResult> {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("The stream is not playing."));
+    }
+    this.dropContinue(new Error("A newer continue replaced this one."));
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        this.dropContinue(new Error("The engine did not answer in time."));
+      }, CONTINUE_TIMEOUT);
+      this.continuing = { clip, reject, resolve, timer };
+      this.lastSent = JSON.stringify(spec);
+      socket.send(
+        JSON.stringify({ ...spec, continue: clip, lead, op: "steer" })
+      );
+    });
   }
 
   /** Fresh model memory. Brief gap while the engine primes it again. */
@@ -285,6 +368,7 @@ class EngineClient {
         return;
       }
       this.socket = null;
+      this.dropContinue(new Error("The stream closed."));
       const phase = useLive.getState().phase;
       if (phase !== "error") {
         set({ grooves: [], phase: "ready", status: "The stream closed" });
@@ -299,37 +383,94 @@ class EngineClient {
     } catch {
       return;
     }
-    if (message.type === "status" && message.message) {
-      set({ status: message.message });
-    } else if (message.type === "started") {
-      set({ phase: "live", status: "Live" });
-    } else if (message.type === "remembered" && message.slot) {
-      const slot = message.slot;
-      const grooves = useLive.getState().grooves;
-      if (!grooves.includes(slot)) {
-        set({ grooves: [...grooves, slot] });
-      }
-    } else if (message.type === "forgotten" && message.slot) {
-      this.dropGroove(message.slot);
-    } else if (message.type === "revived") {
-      toast("The model went quiet, so the engine woke it up", {
-        description:
-          "Held on one style for a long time, the model can fall silent. Changing the style also helps.",
-      });
-    } else if (
-      message.type === "stats" &&
-      typeof message.msPerFrame === "number"
-    ) {
-      const current = useLive.getState().stats;
-      set({ stats: { ...current, msPerFrame: message.msPerFrame } });
-    } else if (message.type === "error") {
-      this.fail(message.message ?? "The stream failed");
+    switch (message.type) {
+      case "status":
+        if (message.message) {
+          set({ status: message.message });
+        }
+        return;
+      case "started":
+        set({ phase: "live", status: "Live" });
+        return;
+      case "stats":
+        this.onStats(message);
+        return;
+      case "remembered":
+        this.addGroove(message.slot);
+        return;
+      case "forgotten":
+        this.dropGroove(message.slot);
+        return;
+      case "continued":
+        this.onContinued(message);
+        return;
+      case "continue-failed":
+        this.onContinueFailed(message);
+        return;
+      case "revived":
+        toast("The model went quiet, so the engine woke it up", {
+          description:
+            "Held on one style for a long time, the model can fall silent. Changing the style also helps.",
+        });
+        return;
+      case "error":
+        this.fail(message.message ?? "The stream failed");
+        return;
+      default:
+        return;
     }
   }
 
-  private dropGroove(slot: string): void {
+  private onStats(message: StreamMessage): void {
+    if (typeof message.msPerFrame !== "number") {
+      return;
+    }
+    const current = useLive.getState().stats;
+    set({ stats: { ...current, msPerFrame: message.msPerFrame } });
+  }
+
+  private onContinued(message: StreamMessage): void {
+    // Everything after this message is the clip's lead-in, then the new
+    // music, so drop what is queued from before.
+    this.audio?.reset();
+    const pending = this.continuing;
+    if (!pending || pending.clip !== message.clip) {
+      return;
+    }
+    this.continuing = null;
+    window.clearTimeout(pending.timer);
+    pending.resolve({ lead: message.lead ?? 0, pickup: message.pickup ?? 0 });
+  }
+
+  private onContinueFailed(message: StreamMessage): void {
+    if (this.continuing?.clip !== message.clip) {
+      return;
+    }
+    this.dropContinue(
+      new Error(message.message ?? "The engine could not continue the clip.")
+    );
+  }
+
+  private addGroove(slot: string | undefined): void {
     const grooves = useLive.getState().grooves;
-    if (grooves.includes(slot)) {
+    if (slot && !grooves.includes(slot)) {
+      set({ grooves: [...grooves, slot] });
+    }
+  }
+
+  private dropContinue(error: Error): void {
+    const pending = this.continuing;
+    if (!pending) {
+      return;
+    }
+    this.continuing = null;
+    window.clearTimeout(pending.timer);
+    pending.reject(error);
+  }
+
+  private dropGroove(slot: string | undefined): void {
+    const grooves = useLive.getState().grooves;
+    if (slot && grooves.includes(slot)) {
       set({ grooves: grooves.filter((item) => item !== slot) });
     }
   }
@@ -338,6 +479,7 @@ class EngineClient {
     const socket = this.socket;
     this.socket = null;
     socket?.close();
+    this.dropContinue(new Error(message));
     set({ grooves: [], phase: "error", status: message });
   }
 

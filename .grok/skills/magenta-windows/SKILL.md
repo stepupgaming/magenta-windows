@@ -30,7 +30,8 @@ From the repo root:
 - `bun run dev` opens the desktop window. It calls pnpm. Do not launch it unless the user asked to see the window.
 - `pnpm mock` runs `scripts/mock-engine.mjs`, a stand-in engine on port 8765 that plays test tones. Use it with `pnpm --filter native dev` to work on the window without a GPU. Stop it when you finish.
 - `pnpm test` runs the stage unit tests. It needs no GPU.
-- `cd engine && uv run --with pytest --with flatbuffers pytest tests` runs the engine tests. It needs no GPU or weights. They cover the streamer on a tiny random model, the session, the GPU lane, the silence watchdog, and the text mapper.
+- `cd engine && uv run --with pytest --with flatbuffers pytest tests` runs the engine tests. It needs no GPU or weights. They cover the streamer on a tiny random model, the session, the GPU lane, the silence watchdog, the text mapper, and continuing from a clip. Set `MAGENTA_TEST_SPECTROSTREAM` to a folder with Google's `encoder.safetensors` and `quantizer.safetensors` to check the encoder against Google's reference codes.
+- `magenta generate --continue song.wav --seconds 20` renders a continuation of an audio file, with `--lead-in` seconds of the file first.
 - The Windows release file is `Magenta.exe`. Download it from the GitHub release and run it. First launch installs PyTorch and the checkpoint. Do not build an NSIS installer.
 - `powershell -ExecutionPolicy Bypass -File .\install.ps1` installs the `magenta` command onto the user PATH. A test install passes `-Prefix` and `-NoPath`.
 

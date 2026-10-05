@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeWav, loudestWindow, peaks } from "./clips.ts";
+import { encodeWav, interleaveTail, loudestWindow, peaks } from "./clips.ts";
 
 describe("encodeWav", () => {
   it("writes a 16-bit stereo RIFF file", async () => {
@@ -38,5 +38,21 @@ describe("loudestWindow", () => {
     const start = loudestWindow({ left, right: left, sampleRate: rate }, 4);
     expect(start).toBeGreaterThanOrEqual(11);
     expect(start).toBeLessThanOrEqual(12.5);
+  });
+});
+
+describe("interleaveTail", () => {
+  const clip = {
+    left: Float32Array.from([1, 2, 3, 4, 5]),
+    right: Float32Array.from([-1, -2, -3, -4, -5]),
+    sampleRate: 2,
+  };
+
+  it("keeps the last seconds as left, right pairs", () => {
+    expect(Array.from(interleaveTail(clip, 1))).toEqual([4, -4, 5, -5]);
+  });
+
+  it("keeps the whole clip when it is shorter", () => {
+    expect(interleaveTail(clip, 60)).toHaveLength(10);
   });
 });

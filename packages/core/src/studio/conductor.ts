@@ -2,6 +2,9 @@
 // step: it steers the model, applies effects, gates Solo, runs scene morphs,
 // and advances the chord progression.
 
+import { toast } from "sonner";
+import type { StereoClip } from "./audio.ts";
+import { CONTINUE_MAX, CONTINUE_MIN } from "./clips.ts";
 import { engine } from "./engine.ts";
 import { parseProgression, voiceChord } from "./music.ts";
 import { blendScenes, ease, snapshot } from "./scenes.ts";
@@ -13,6 +16,7 @@ import {
   useLive,
   useStudio,
 } from "./store.ts";
+import { SAMPLE_RATE } from "./types.ts";
 
 const STEER_EVERY = 40;
 const PROGRESSION_FLOOR = 52;
@@ -72,6 +76,73 @@ export function reroll(): void {
 /** Clear the model's memory and start again. */
 export function freshStart(): void {
   engine.restart(currentSpec());
+}
+
+// ---- Continue from a clip --------------------------------------------------
+
+/** Seconds of the clip the engine plays again before the new music starts. */
+const CONTINUE_LEAD = 2;
+
+/** Resolve once the stream is playing, starting it when it is not. */
+function ensurePlaying(): Promise<void> {
+  if (isPlaying(useLive.getState().phase)) {
+    return Promise.resolve();
+  }
+  play();
+  return new Promise((resolve, reject) => {
+    const off = useLive.subscribe((state) => {
+      if (isPlaying(state.phase)) {
+        off();
+        resolve();
+      } else if (state.phase === "error" || state.phase === "offline") {
+        off();
+        reject(new Error(state.status));
+      }
+    });
+  });
+}
+
+/**
+ * Have the model carry on from the end of a clip, as if it had just played
+ * it. Starts the stream when it is stopped. One at a time.
+ */
+export async function continueClip(
+  clip: StereoClip,
+  label: string
+): Promise<boolean> {
+  if (useLive.getState().continuing !== null) {
+    return false;
+  }
+  useLive.setState({ continuing: label });
+  try {
+    const id = await engine.uploadContinueClip(clip);
+    await ensurePlaying();
+    await engine.continueWith(currentSpec(), id, CONTINUE_LEAD);
+    return true;
+  } catch (error) {
+    toast.error("Could not continue from that", {
+      description: error instanceof Error ? error.message : undefined,
+    });
+    return false;
+  } finally {
+    useLive.setState({ continuing: null });
+  }
+}
+
+/**
+ * Go back `seconds` in what the model played and let it take the music
+ * somewhere else from there.
+ */
+export async function rewind(seconds: number): Promise<boolean> {
+  const audio = engine.audio;
+  const clip = audio ? await audio.history(CONTINUE_MAX, seconds) : null;
+  if (!clip || clip.left.length < CONTINUE_MIN * SAMPLE_RATE) {
+    toast("Not enough music to rewind yet", {
+      description: `Rewind needs ${CONTINUE_MIN} seconds of what the model played before that point.`,
+    });
+    return false;
+  }
+  return continueClip(clip, `${seconds} seconds back`);
 }
 
 // ---- Scenes --------------------------------------------------------------
