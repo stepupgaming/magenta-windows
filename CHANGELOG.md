@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.4](https://github.com/stepupgaming/magenta-windows/compare/v0.1.3...v0.1.4) (2026-10-05)
+
+
+### Bug Fixes
+
+* let magenta generate continue a clip ([#11](https://github.com/stepupgaming/magenta-windows/issues/11)) ([88ae423](https://github.com/stepupgaming/magenta-windows/commit/88ae4232c630596e44664e77181d9372d6996340))
+* steer with all 12 style tokens and let generate leave drums to the model ([#14](https://github.com/stepupgaming/magenta-windows/issues/14)) ([168b0a5](https://github.com/stepupgaming/magenta-windows/commit/168b0a51dade790812d37b512ec1a625c358a03f))
+
 ## [0.1.3](https://github.com/stepupgaming/magenta-windows/compare/v0.1.2...v0.1.3) (2026-10-05)
 
 
