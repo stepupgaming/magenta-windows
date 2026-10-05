@@ -6,5 +6,18 @@
     "ultracite/biome/next"
   ],
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
-  "files": { "ignoreUnknown": false }
+  "files": {
+    "ignoreUnknown": false,
+    // The PyTorch port's configs are vendored as published.
+    "includes": ["!engine/model_code"]
+  },
+  "overrides": [
+    {
+      // AudioWorklet scope globals for the playback and tap processors.
+      "includes": ["**/public/pcm-worklet.js"],
+      "javascript": {
+        "globals": ["AudioWorkletProcessor", "registerProcessor", "sampleRate"]
+      }
+    }
+  ]
 }

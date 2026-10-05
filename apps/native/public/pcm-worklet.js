@@ -1,7 +1,13 @@
-// The GPU finishes each chunk a little after the speaker clock (about 0.94x).
-// A fixed queue eventually runs dry, and the dry splice is the click.
-// This keeps about one second queued and overlap-adds a slightly longer grain
-// so the queue stays full. Pitch stays put. Tempo sits a little under native.
+// Two audio-thread processors for the Magenta stage.
+//
+// pcm-processor plays the engine's PCM. The GPU finishes each chunk a little
+// after the speaker clock (about 0.94x). A fixed queue eventually runs dry,
+// and the dry splice is the click. This keeps a cushion queued (one second by
+// default) and overlap-adds a slightly longer grain so the queue stays full.
+// Pitch stays put. Tempo sits a little under native.
+//
+// tap-processor passes the master bus through untouched. It meters every
+// sample, keeps the last minute for retro capture, and streams a recording.
 
 const WIN = 2048;
 const HOP = 1024;
@@ -9,6 +15,9 @@ const SEARCH = 48;
 const CAPACITY = 48_000 * 8;
 const OUT_CAP = 8192;
 const FADE = 256;
+const STATS_EVERY = 4800;
+const MIN_TARGET = 0.25;
+const MAX_TARGET = 3;
 
 function riseWindow(length) {
   const window = new Float32Array(length);
@@ -18,38 +27,55 @@ function riseWindow(length) {
   return window;
 }
 
+function targetFrames(seconds) {
+  const clamped = Math.min(MAX_TARGET, Math.max(MIN_TARGET, seconds));
+  return Math.round(sampleRate * clamped);
+}
+
 class PcmProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     const asked = options?.processorOptions?.production;
+    const target = options?.processorOptions?.target;
     this.production =
       typeof asked === "number" && asked > 0.5 && asked < 1.2 ? asked : 0.94;
-    this.target = Math.round(sampleRate);
+    this.target = targetFrames(typeof target === "number" ? target : 1);
     this.ratio = 1 / this.production;
     this.left = new Float32Array(CAPACITY);
     this.right = new Float32Array(CAPACITY);
+    this.rise = riseWindow(HOP);
+    this.tailL = new Float32Array(HOP);
+    this.tailR = new Float32Array(HOP);
+    this.outL = new Float32Array(OUT_CAP);
+    this.outR = new Float32Array(OUT_CAP);
+    this.underruns = 0;
+    this.sinceStats = 0;
+    this.clear();
+    this.port.onmessage = (event) => {
+      const data = event.data;
+      if (!data) {
+        return;
+      }
+      if (data.kind === "pcm") {
+        this.pushInput(data.samples);
+      } else if (data.kind === "target") {
+        this.target = targetFrames(data.seconds);
+      } else if (data.kind === "reset") {
+        this.clear();
+      }
+    };
+  }
+
+  clear() {
     this.write = 0;
     this.read = 0;
     this.available = 0;
     this.started = false;
-    this.dying = false;
     this.duck = 0;
     this.hasTail = false;
-    this.tailL = new Float32Array(HOP);
-    this.tailR = new Float32Array(HOP);
-    this.rise = riseWindow(HOP);
-    this.outL = new Float32Array(OUT_CAP);
-    this.outR = new Float32Array(OUT_CAP);
     this.outW = 0;
     this.outRpos = 0;
     this.outCount = 0;
-    this.port.onmessage = (event) => {
-      const data = event.data;
-      if (!data || data.kind !== "pcm") {
-        return;
-      }
-      this.pushInput(data.samples);
-    };
   }
 
   pushInput(incoming) {
@@ -68,8 +94,7 @@ class PcmProcessor extends AudioWorkletProcessor {
   }
 
   at(channel, logical) {
-    const index =
-      (((this.read + logical) % CAPACITY) + CAPACITY) % CAPACITY;
+    const index = (((this.read + logical) % CAPACITY) + CAPACITY) % CAPACITY;
     return channel === 0 ? this.left[index] : this.right[index];
   }
 
@@ -141,14 +166,30 @@ class PcmProcessor extends AudioWorkletProcessor {
     return true;
   }
 
+  report(count) {
+    this.sinceStats += count;
+    if (this.sinceStats < STATS_EVERY) {
+      return;
+    }
+    this.sinceStats = 0;
+    this.port.postMessage({
+      kind: "stats",
+      playing: this.started,
+      queued: (this.available + this.outCount) / sampleRate,
+      ratio: this.ratio,
+      underruns: this.underruns,
+    });
+  }
+
   process(_inputs, outputs) {
     const channel = outputs[0];
     const left = channel[0];
     const right = channel[1];
-    if (!left || !right) {
+    if (!(left && right)) {
       return true;
     }
     const count = left.length;
+    this.report(count);
     if (!this.started) {
       if (this.available < this.target) {
         left.fill(0);
@@ -162,7 +203,7 @@ class PcmProcessor extends AudioWorkletProcessor {
         break;
       }
     }
-    this.dying = this.outCount < 512;
+    const dying = this.outCount < 512;
     for (let index = 0; index < count; index += 1) {
       let sampleL = 0;
       let sampleR = 0;
@@ -172,7 +213,7 @@ class PcmProcessor extends AudioWorkletProcessor {
         this.outRpos = (this.outRpos + 1) % OUT_CAP;
         this.outCount -= 1;
       }
-      if (this.dying) {
+      if (dying) {
         this.duck = Math.max(0, this.duck - 1 / FADE);
       } else {
         this.duck = Math.min(1, this.duck + 1 / FADE);
@@ -180,8 +221,153 @@ class PcmProcessor extends AudioWorkletProcessor {
       left[index] = sampleL * this.duck;
       right[index] = sampleR * this.duck;
     }
+    if (dying && this.outCount === 0 && this.duck === 0) {
+      // The queue ran dry. Wait for a full cushion again instead of
+      // stuttering on scraps.
+      this.underruns += 1;
+      this.started = false;
+      this.hasTail = false;
+    }
+    return true;
+  }
+}
+
+const RETRO_SECONDS = 60;
+const RECORD_CHUNK = 12_000;
+const METER_EVERY = 1600;
+
+class TapProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.size = Math.round(sampleRate * RETRO_SECONDS);
+    this.ringL = new Float32Array(this.size);
+    this.ringR = new Float32Array(this.size);
+    this.head = 0;
+    this.filled = 0;
+    this.recording = false;
+    this.chunkL = new Float32Array(RECORD_CHUNK);
+    this.chunkR = new Float32Array(RECORD_CHUNK);
+    this.chunkFill = 0;
+    this.meterCount = 0;
+    this.peakL = 0;
+    this.peakR = 0;
+    this.sumL = 0;
+    this.sumR = 0;
+    this.port.onmessage = (event) => {
+      const data = event.data;
+      if (!data) {
+        return;
+      }
+      if (data.kind === "capture") {
+        this.capture(data.id, data.seconds);
+      } else if (data.kind === "record") {
+        if (data.on) {
+          this.chunkFill = 0;
+          this.recording = true;
+        } else {
+          this.flushChunk();
+          this.recording = false;
+          this.port.postMessage({ kind: "record-end" });
+        }
+      }
+    };
+  }
+
+  capture(id, seconds) {
+    const frames = Math.min(this.filled, Math.round(sampleRate * seconds));
+    const left = new Float32Array(frames);
+    const right = new Float32Array(frames);
+    const start = (this.head - frames + this.size) % this.size;
+    for (let index = 0; index < frames; index += 1) {
+      const at = (start + index) % this.size;
+      left[index] = this.ringL[at];
+      right[index] = this.ringR[at];
+    }
+    this.port.postMessage({ id, kind: "capture", left, right }, [
+      left.buffer,
+      right.buffer,
+    ]);
+  }
+
+  flushChunk() {
+    if (this.chunkFill === 0) {
+      return;
+    }
+    const left = this.chunkL.slice(0, this.chunkFill);
+    const right = this.chunkR.slice(0, this.chunkFill);
+    this.chunkFill = 0;
+    this.port.postMessage({ kind: "chunk", left, right }, [
+      left.buffer,
+      right.buffer,
+    ]);
+  }
+
+  meter(sampleL, sampleR) {
+    const absL = Math.abs(sampleL);
+    const absR = Math.abs(sampleR);
+    if (absL > this.peakL) {
+      this.peakL = absL;
+    }
+    if (absR > this.peakR) {
+      this.peakR = absR;
+    }
+    this.sumL += sampleL * sampleL;
+    this.sumR += sampleR * sampleR;
+    this.meterCount += 1;
+    if (this.meterCount < METER_EVERY) {
+      return;
+    }
+    this.port.postMessage({
+      kind: "meter",
+      peakL: this.peakL,
+      peakR: this.peakR,
+      rmsL: Math.sqrt(this.sumL / this.meterCount),
+      rmsR: Math.sqrt(this.sumR / this.meterCount),
+    });
+    this.meterCount = 0;
+    this.peakL = 0;
+    this.peakR = 0;
+    this.sumL = 0;
+    this.sumR = 0;
+  }
+
+  process(inputs, outputs) {
+    const input = inputs[0];
+    const output = outputs[0];
+    const outL = output[0];
+    const outR = output[1] ?? output[0];
+    if (!outL) {
+      return true;
+    }
+    const inL = input?.[0];
+    const inR = input?.[1] ?? inL;
+    const count = outL.length;
+    for (let index = 0; index < count; index += 1) {
+      const sampleL = inL ? inL[index] : 0;
+      const sampleR = inR ? inR[index] : 0;
+      outL[index] = sampleL;
+      if (outR !== outL) {
+        outR[index] = sampleR;
+      }
+      this.ringL[this.head] = sampleL;
+      this.ringR[this.head] = sampleR;
+      this.head = (this.head + 1) % this.size;
+      if (this.filled < this.size) {
+        this.filled += 1;
+      }
+      if (this.recording) {
+        this.chunkL[this.chunkFill] = sampleL;
+        this.chunkR[this.chunkFill] = sampleR;
+        this.chunkFill += 1;
+        if (this.chunkFill === RECORD_CHUNK) {
+          this.flushChunk();
+        }
+      }
+      this.meter(sampleL, sampleR);
+    }
     return true;
   }
 }
 
 registerProcessor("pcm-processor", PcmProcessor);
+registerProcessor("tap-processor", TapProcessor);

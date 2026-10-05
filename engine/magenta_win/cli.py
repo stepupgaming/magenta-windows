@@ -105,6 +105,7 @@ def build_spec(args: argparse.Namespace) -> dict[str, Any]:
     require_range("temperature", float(args.temperature), 0.2, 2)
     require_range("top-k", float(args.top_k), 1, 256)
     require_range("style", float(args.style), 0, 6)
+    require_range("style-detail", float(args.style_detail), 1, 12)
     require_range("note-strength", float(args.note_strength), 0, 6)
     require_range("drum-strength", float(args.drum_strength), 0, 4)
     return {
@@ -117,6 +118,7 @@ def build_spec(args: argparse.Namespace) -> dict[str, Any]:
         "notes": held_notes(list(args.note)),
         "drums": bool(args.drums),
         "seed": int(args.seed),
+        "style_levels": int(args.style_detail),
     }
 
 
@@ -136,7 +138,8 @@ def http_json(port: int, method: str, path: str, timeout: float) -> dict[str, An
 
 
 def print_health(payload: dict[str, Any]) -> None:
-    for key in ("ok", "backend", "model_loaded", "error", "gpu", "sample_rate"):
+    keys = ("ok", "backend", "model_loaded", "error", "gpu", "sample_rate", "text_mapper", "text_mapper_detail")
+    for key in keys:
         if key in payload:
             print(f"{key}: {payload[key]}")
 
@@ -284,6 +287,13 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--temperature", type=float, default=1.05, help="Sampling temperature, from 0.2 to 2.")
     generate.add_argument("--top-k", dest="top_k", type=int, default=48, help="How many token choices are kept, from 1 to 256.")
     generate.add_argument("--style", type=float, default=2.4, help="How hard the text prompts steer, from 0 to 6.")
+    generate.add_argument(
+        "--style-detail",
+        dest="style_detail",
+        type=int,
+        default=6,
+        help="How many of the 12 style tokens steer, coarsest first, from 1 to 12. Google's apps use 6.",
+    )
     generate.add_argument("--note-strength", type=float, default=0.8, help="How hard held notes steer, from 0 to 6.")
     generate.add_argument("--drums", action="store_true", help="Turn the drum conditioning on.")
     generate.add_argument("--drum-strength", type=float, default=1.0, help="Drum steer, from 0 to 4. Used only with --drums.")

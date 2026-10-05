@@ -28,6 +28,9 @@ From the repo root:
 - `npx --package github:stepupgaming/magenta-windows magenta --help`
 - `bunx --package github:stepupgaming/magenta-windows magenta --help`
 - `bun run dev` opens the desktop window. It calls pnpm. Do not launch it unless the user asked to see the window.
+- `pnpm mock` runs `scripts/mock-engine.mjs`, a stand-in engine on port 8765 that plays test tones. Use it with `pnpm --filter native dev` to work on the window without a GPU. Stop it when you finish.
+- `pnpm test` runs the stage unit tests. It needs no GPU.
+- `cd engine && uv run --with pytest --with flatbuffers pytest tests` runs the engine tests. It needs no GPU or weights. They cover the streamer on a tiny random model, the session, the GPU lane, the silence watchdog, and the text mapper.
 - The Windows release file is `Magenta.exe`. Download it from the GitHub release and run it. First launch installs PyTorch and the checkpoint. Do not build an NSIS installer.
 - `powershell -ExecutionPolicy Bypass -File .\install.ps1` installs the `magenta` command onto the user PATH. A test install passes `-Prefix` and `-NoPath`.
 

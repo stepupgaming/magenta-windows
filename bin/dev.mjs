@@ -12,7 +12,7 @@ const result = spawnSync("pnpm", ["--filter", "native", "tauri", "dev"], {
 
 if (result.error) {
   process.stderr.write(
-    "pnpm is required for the desktop dev window. Install pnpm 10, then run bun run dev again.\n",
+    "pnpm is required for the desktop dev window. Install pnpm 10, then run bun run dev again.\n"
   );
   process.exit(1);
 }

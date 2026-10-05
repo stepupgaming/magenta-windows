@@ -113,10 +113,13 @@ class TransformerStack(nn.Module):
             x = blk["ffn"](x)
         return x
 
-    def step_fn(self, x, self_kv, cross_kv, source_frame):
+    def step_fn(self, x, self_kv, cross_kv, source_frame, source_kv=None):
         """Functional, export-clean per-frame step over all layers.
 
         self_kv / cross_kv: lists of (k, v) per layer ([b,T,nh,uph], T may be 0).
+        source_kv: optional per-layer (k, v) of `source_frame` from `source_kv()`.
+        A streamer whose source rarely changes passes it to skip two projections
+        per layer per frame; the result is the same.
         Returns (out[b,1,d], new_self_kv, new_cross_kv) with untrimmed KV."""
         new_self = []
         new_cross = []
@@ -125,13 +128,17 @@ class TransformerStack(nn.Module):
             new_self.append((k, v))
             if self.use_cross:
                 ca = blk["cross_attention"]
-                sk, sv = ca._kv(source_frame)
+                sk, sv = ca._kv(source_frame) if source_kv is None else source_kv[i]
                 sk = torch.cat([cross_kv[i][0], sk], dim=1)
                 sv = torch.cat([cross_kv[i][1], sv], dim=1)
                 new_cross.append((sk, sv))
                 x = ca.attend_fn(x, sk, sv)
             x = blk["ffn"](x)
         return x, new_self, new_cross
+
+    def source_kv(self, source):
+        """Per-layer cross-attention (k, v) of an encoded source."""
+        return [blk["cross_attention"]._kv(source) for blk in self.layers]
 
 
 class EncoderEmbedding(nn.Module):
@@ -196,6 +203,7 @@ class MultivariateDecoder(nn.Module):
             dd, cfg.depth_max_past, num_sinks=0, use_cross=False)
         self.final_ln = L.LayerNorm(dd.model_dims)
         self.to_logits = L.JaxLinear(dd.model_dims, cfg.vocab_size, use_bias=True)
+        self._codebook_heads = None
 
     def embed(self, tokens):
         # tokens: [...,] int -> [..., td_dim]
@@ -230,20 +238,57 @@ class MultivariateDecoder(nn.Module):
         return logits
 
     # ---- functional (AOTI-compilable) streaming -------------------------
-    def temporal_step_fn(self, prev_frame, self_kv, cross_kv, source_frame):
-        """Functional temporal step: prev_frame[b,1,Q] -> (temporal_out, kv...)."""
+    def temporal_step_fn(self, prev_frame, self_kv, cross_kv, source_frame, source_kv=None):
+        """Functional temporal step: prev_frame[b,1,Q] -> (temporal_out, kv...).
+        source_kv: optional precomputed `source_kv(source_frame)`."""
         embedded = self.embed(prev_frame)
         ti = _mean_f32(embedded, axis=-2)
-        return self.temporal_body.step_fn(ti, self_kv, cross_kv, source_frame)
+        return self.temporal_body.step_fn(ti, self_kv, cross_kv, source_frame, source_kv)
 
-    def depth_step_fn(self, depth_input, depth_kv):
-        """Functional depth step: depth_input[b,1,Dt] + kv -> (logits, new_kv)."""
+    def source_kv(self, source):
+        """Per-layer temporal cross-attention (k, v) for an encoded source."""
+        return self.temporal_body.source_kv(source)
+
+    def codebook_head(self, codebook, dtype):
+        """`to_logits` kernel and bias for one codebook's tokens, as contiguous copies.
+
+        Sampling codebook q only reads logits [lo, lo + codebook_size), so a step
+        that knows q can skip the other codebooks' columns: about 1/12 of the
+        head's weight reads. The cache key holds the weights' version counters
+        and storage, so loading or moving weights rebuilds it."""
+        kernel, bias = self.to_logits.kernel, self.to_logits.bias
+        if torch.compiler.is_compiling():
+            heads = None
+        else:
+            key = (dtype, kernel.device, kernel.data_ptr(), kernel._version, bias.data_ptr(), bias._version)
+            cached = self._codebook_heads
+            heads = cached[1] if cached is not None and cached[0] == key else None
+        if heads is None:
+            cfg = self.cfg
+            with torch.no_grad():
+                heads = []
+                for q in range(cfg.num_codebooks):
+                    lo = cfg.num_reserved_tokens + q * cfg.codebook_size
+                    hi = lo + cfg.codebook_size
+                    heads.append((kernel[:, lo:hi].to(dtype).contiguous(), bias[lo:hi].to(dtype).contiguous()))
+            if not torch.compiler.is_compiling():
+                self._codebook_heads = (key, heads)
+        return heads[codebook]
+
+    def depth_step_fn(self, depth_input, depth_kv, codebook=None):
+        """Functional depth step: depth_input[b,1,Dt] + kv -> (logits, new_kv).
+
+        codebook=None returns logits over the whole vocab. codebook=q returns only
+        codebook q's logits [b,1,codebook_size], the slice a sampler would take."""
         h = depth_input
         if self.depth_input_adapter is not None:
             h = self.depth_input_adapter(h)
         h, nk, _ = self.depth_body.step_fn(h, depth_kv, [], None)
         h = self.final_ln(h)
-        return self._soft_cap(self.to_logits(h)), nk
+        if codebook is None:
+            return self._soft_cap(self.to_logits(h)), nk
+        kernel, bias = self.codebook_head(codebook, h.dtype)
+        return self._soft_cap(torch.matmul(h, kernel) + bias), nk
 
     def init_streaming_f(self, batch, device, dtype=torch.float32):
         td = self.cfg.temporal
